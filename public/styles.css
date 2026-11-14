@@ -492,7 +492,7 @@ td:nth-child(2), td:nth-child(3), th:nth-child(2), th:nth-child(3) { text-align:
 .role-duty-list time { color: var(--red); font-size: 13px; font-weight: 800; }
 .role-duty-list span { font-size: 14px; line-height: 1.5; }
 .week-speeches-panel { margin-top: 0; }
-.week-speeches { padding: 20px; display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
+.week-speeches { padding: 20px; display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
 .week-speech { min-height: 150px; padding: 23px; background: var(--ink); color: var(--white); border-top: 4px solid var(--gold); cursor: help; }
 .week-speech .speaker { color: #edc15e; font-size: 18px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .week-speech h4 { margin: 11px 0 8px; font-family: Georgia, serif; font-size: 26px; font-weight: 400; line-height: 1.15; }

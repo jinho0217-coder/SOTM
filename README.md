@@ -29,6 +29,6 @@ npm start
 
 - 한국 시간 기준 오늘보다 이전인 정규 모임을 완료 모임으로 계산합니다.
 - `No Meeting` 표시는 집계에서 제외합니다.
-- `Speaker 1–4`는 `Speaker`, `Evaluator 1–4`는 `Evaluator` 역할로 합산합니다.
+- `Speaker 1–2`는 `Speaker`, `Evaluator 1–2`는 `Evaluator` 역할로 합산합니다.
 - 스피치 상세는 같은 열의 Speaker, Project, Title, Time, Evaluator 값을 연결합니다.
 - 이번 주는 오늘 이후 가장 가까운 모임 날짜로 선택합니다.

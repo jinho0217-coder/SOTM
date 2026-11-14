@@ -274,8 +274,8 @@ function sheetDateValue(date) {
 }
 function canonicalRole(label) {
   const value = clean(label);
-  if (/^Speaker \d+$/i.test(value)) return "Speaker";
-  if (/^Evaluator \d+$/i.test(value)) return "Evaluator";
+  if (/^Speaker [12]$/i.test(value)) return "Speaker";
+  if (/^Evaluator [12]$/i.test(value)) return "Evaluator";
   const map = {
     "Table Topic Master": "Table Topic Master",
     "Table Topics Master": "Table Topic Master",
@@ -348,7 +348,7 @@ function buildModel(rolesRows, agendaRows) {
     });
   });
 
-  for (let number = 1; number <= 4; number += 1) {
+  for (let number = 1; number <= 2; number += 1) {
     const speakerRow = rowsByLabel.get(`Speaker ${number}`)?.row || [];
     const projectRow = rowsByLabel.get(`Project ${number}`)?.row || [];
     const titleRow = rowsByLabel.get(`Title ${number}`)?.row || [];
@@ -413,7 +413,7 @@ function detailedAgenda(model, meeting) {
   const memberFor = label => displayAssignment(model.rowsByLabel.get(label)?.row[meeting.col]);
   const combinedMembers = labels => [...new Set(labels.map(memberFor))].join(" / ");
   const speeches = [];
-  for (let number = 1; number <= 4; number += 1) {
+  for (let number = 1; number <= 2; number += 1) {
     const speaker = normalizeName(model.rowsByLabel.get(`Speaker ${number}`)?.row[meeting.col]);
     if (number > 1 && !speaker) continue;
     speeches.push([
@@ -802,7 +802,7 @@ function openMeetingEditor(section, field = "", speechSlot = null, originItem = 
     content = fields.map(label => editFieldHtml(meeting, label)).join("");
   }
   if (section === "speeches") {
-    const slots = speechSlot ? [Number(speechSlot)] : [1, 2, 3, 4];
+    const slots = speechSlot ? [Number(speechSlot)] : [1, 2];
     content = slots.map(number => {
       const speechFields = [`Speaker ${number}`, `Project ${number}`, `Title ${number}`, `Time ${number}`, `Evaluator ${number}`];
       const visibleFields = field && speechFields.includes(field) ? [field] : speechFields;
@@ -1006,7 +1006,7 @@ function renderMeetingReadiness(model, meeting) {
   ROLE_LABELS.filter(role => role !== "Speaker" && role !== "Evaluator").forEach(label => {
     requirements.push({ label, complete: confirmedAssignment(model.rowsByLabel.get(label)?.row[meeting.col]) });
   });
-  for (let number = 1; number <= 3; number += 1) {
+  for (let number = 1; number <= 2; number += 1) {
     const speaker = normalizeName(model.rowsByLabel.get(`Speaker ${number}`)?.row[meeting.col]);
     if (number > 1 && !speaker) continue;
     requirements.push(
@@ -1339,7 +1339,7 @@ function renderThisWeek(model) {
   renderCompactAgenda(model, meeting);
 
   const weekSpeeches = [];
-  for (let number = 1; number <= 4; number += 1) {
+  for (let number = 1; number <= 2; number += 1) {
     const speaker = normalizeName(model.rowsByLabel.get(`Speaker ${number}`)?.row[meeting.col]);
     if (number > 1 && !speaker) continue;
     const title = clean(model.rowsByLabel.get(`Title ${number}`)?.row[meeting.col]);

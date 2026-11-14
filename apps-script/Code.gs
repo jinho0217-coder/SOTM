@@ -21,8 +21,6 @@ const EDITABLE_FIELDS = {
   speeches: [
     "Speaker 1", "Project 1", "Title 1", "Time 1", "Evaluator 1",
     "Speaker 2", "Project 2", "Title 2", "Time 2", "Evaluator 2",
-    "Speaker 3", "Project 3", "Title 3", "Time 3", "Evaluator 3",
-    "Speaker 4", "Project 4", "Title 4", "Time 4", "Evaluator 4",
   ],
   awards: ["Best Speaker", "Best evaluator", "Best table topic speaker"],
 };
@@ -110,7 +108,7 @@ function sheetContext() {
 }
 
 function assignmentSection(label) {
-  if (/^(Speaker|Evaluator) [1-4]$/.test(label)) return "speeches";
+  if (/^(Speaker|Evaluator) [1-2]$/.test(label)) return "speeches";
   return EDITABLE_FIELDS.roles.includes(label) && !EDITABLE_FIELDS.awards.includes(label) ? "roles" : "";
 }
 

@@ -20,7 +20,7 @@ function guestRoleIcon(value) {
   if (!isGuestAssignment(value)) return "";
   return '<svg class="role-guest-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" role="img" aria-label="Guest"><title>Guest</title><circle cx="9" cy="7" r="3.5"/><path d="M2.5 21v-3.5a6.5 6.5 0 0 1 13 0V21M19 7v6m-3-3h6"/></svg>';
 }
-function isAssignmentField(label) { return ROLE_EDIT_FIELDS.includes(label) || /^(Speaker|Evaluator) [1-4]$/.test(label); }
+function isAssignmentField(label) { return ROLE_EDIT_FIELDS.includes(label) || /^(Speaker|Evaluator) [1-2]$/.test(label); }
 function confirmedAssignment(value) { return Boolean(normalizeName(value)) && !isTentative(value); }
 function confirmDueAssignmentRows(rows, now = new Date()) {
   const today = todayKst(now);
