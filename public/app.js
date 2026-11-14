@@ -2,7 +2,6 @@ const state = { model: null, member: "all", role: "all", meetingView: "coming", 
 const SHEET_ID = "1_I9lmaPePJYkBaiUkloi5aLQAajVd5NJ3WpC2fv-TD8";
 const SHEET_SOURCE = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit?gid=0`;
 const WRITE_ENDPOINT = clean(window.YTTM_CONFIG?.writeEndpoint);
-const LIBRARY_ENDPOINT = clean(window.YTTM_CONFIG?.libraryEndpoint);
 const THEME_EDIT_FIELDS = ["Theme", "Theme Question", "Word of the day", "Quote of the day"];
 const SPECIAL_EDIT_FIELDS = ["Special Event"];
 const AWARD_EDIT_FIELDS = ["Best Speaker", "Best evaluator", "Best table topic speaker"];
@@ -15,19 +14,6 @@ const ROLE_EDIT_FIELDS = [
   "Chairperson", "Toastmaster", "General Evaluator", "Table Topic Master", "Timer",
   "Ah Counter", "Grammarian", "Word & Quote Master",
 ];
-
-async function libraryRequest(payload) {
-  if (!LIBRARY_ENDPOINT) throw new Error("예약 서버 설정이 필요합니다.");
-  const response = await fetch(LIBRARY_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(12000),
-  });
-  const result = await response.json();
-  if (!response.ok || !result.ok) throw new Error(result.error || "예약 서버 요청에 실패했습니다.");
-  return result;
-}
 
 async function apiRequest(payload) {
   if (!WRITE_ENDPOINT) throw new Error("The shared draft service is not configured.");
@@ -200,16 +186,13 @@ const ROLE_LABELS = [
 ];
 
 const AGENDA_FALLBACK = [
-  ["09:50", "Icebreaking", "Members & guests"],
-  ["10:00", "Introduction", "Chairperson"],
-  ["10:05", "Toastmaster's Session", "Theme & role introductions"],
-  ["10:20", "Prepared Speech Session", "Speakers & evaluators"],
-  ["10:50", "Q & A Session", "Questions to speakers"],
-  ["11:00", "Break", "10 minutes"],
-  ["11:10", "Table Topics", "Impromptu speaking"],
-  ["11:30", "Evaluation Session", "Evaluations & reports"],
-  ["11:55", "Announcement Session", "Awards & announcements"],
-  ["12:00", "Closing", "Chairperson"],
+  ["12:00", "Chair Calls Meeting to Order", "Chairperson"],
+  ["12:05", "Toastmaster Calls on Meeting Roles", "Theme & role introductions"],
+  ["12:10", "Prepared Speech Session", "Speakers & evaluators"],
+  ["12:25", "Table Topic Session", "Impromptu speaking"],
+  ["12:35", "Evaluation Session", "Evaluations & reports"],
+  ["12:50", "Awards Session", "Toastmaster"],
+  ["12:55", "Closing", "Chairperson"],
 ];
 
 function parseCsv(text) {
@@ -426,11 +409,11 @@ function detailedAgenda(model, meeting) {
   }
   return [
     {
-      time: "10:00", title: "Chair Calls Meeting to Order", ownerRole: "Chairperson", owner: memberFor("Chairperson"),
+      time: "12:00", title: "Chair Calls Meeting to Order", ownerRole: "Chairperson", owner: memberFor("Chairperson"),
       bullets: ["Chair's Welcome", "Read Mission Statement", "Introduction of Toastmasters Club Meeting"],
     },
     {
-      time: "10:05", title: "Toastmaster Calls on Meeting Roles", ownerRole: "Toastmaster", owner: memberFor("Toastmaster"),
+      time: "12:05", title: "Toastmaster Calls on Meeting Roles", ownerRole: "Toastmaster", owner: memberFor("Toastmaster"),
       table: {
         headers: ["Role", "Person"],
         rows: [
@@ -442,20 +425,16 @@ function detailedAgenda(model, meeting) {
       },
     },
     {
-      time: "10:20", title: "Prepared Speech Session", ownerRole: "Toastmaster", owner: memberFor("Toastmaster"),
+      time: "12:10", title: "Prepared Speech Session", ownerRole: "Toastmaster", owner: memberFor("Toastmaster"),
       table: { headers: ["Speaker", "Project", "Speech Title", "Time", "Evaluator"], rows: speeches },
       note: "1 min silence after each speech",
     },
     {
-      time: "10:50", title: "Break", owner: "",
-      bullets: ["Deliver feedback to speaker and transfer meeting fee (check left account information)"],
-    },
-    {
-      time: "11:00", title: "Table Topic Session", ownerRole: "Table Topic Master", owner: memberFor("Table Topic Master"),
+      time: "12:25", title: "Table Topic Session", ownerRole: "Table Topic Master", owner: memberFor("Table Topic Master"),
       bullets: ["Conduct Table Topics Session", "Call for Timer's Report", "Recap Speakers and Give Reminder to Vote"],
     },
     {
-      time: "11:30", title: "Evaluation Session", ownerRole: "General Evaluator", owner: memberFor("General Evaluator"),
+      time: "12:35", title: "Evaluation Session", ownerRole: "General Evaluator", owner: memberFor("General Evaluator"),
       bullets: ["Speech Evaluation (2-3 min per speech)", "Call for Timer's Report"],
       table: {
         headers: ["Report", "Person"],
@@ -467,11 +446,11 @@ function detailedAgenda(model, meeting) {
       },
     },
     {
-      time: "11:50", title: "Awards Session", ownerRole: "Toastmaster", owner: memberFor("Toastmaster"),
+      time: "12:50", title: "Awards Session", ownerRole: "Toastmaster", owner: memberFor("Toastmaster"),
       bullets: ["Awards", "Closing remarks"],
     },
     {
-      time: "11:55", title: "Closing", ownerRole: "Chairperson", owner: memberFor("Chairperson"),
+      time: "12:55", title: "Closing", ownerRole: "Chairperson", owner: memberFor("Chairperson"),
       bullets: ["Next Meeting", "Announcement and Meeting Role Sign-up", "Guest Feedback and Group Photo"],
     },
   ];
@@ -536,35 +515,35 @@ function configureDetailsEditor(section = "", field = "") {
 
 const ROLE_AGENDA_DUTIES = {
   Chairperson: [
-    ["10:00", "Call the meeting to order, welcome members and guests, read the mission statement, and introduce the club meeting."],
-    ["11:55", "Close the meeting with the next meeting notice, announcements, role sign-up, guest feedback, and group photo."],
+    ["12:00", "Call the meeting to order, welcome members and guests, read the mission statement, and introduce the club meeting."],
+    ["12:55", "Close the meeting with the next meeting notice, announcements, role sign-up, guest feedback, and group photo."],
   ],
   Toastmaster: [
-    ["10:05", "Call on meeting role holders and introduce the meeting team."],
-    ["10:20", "Conduct the Prepared Speech Session and introduce each speaker."],
-    ["11:50", "Conduct the Awards Session and deliver closing remarks."],
+    ["12:05", "Call on meeting role holders and introduce the meeting team."],
+    ["12:10", "Conduct the Prepared Speech Session and introduce each speaker."],
+    ["12:50", "Conduct the Awards Session and deliver closing remarks."],
   ],
   "General Evaluator": [
-    ["11:30", "Conduct the Evaluation Session, call speech evaluators and role reports, and deliver the General Evaluator's report."],
+    ["12:35", "Conduct the Evaluation Session, call speech evaluators and role reports, and deliver the General Evaluator's report."],
   ],
   "Table Topic Master": [
-    ["11:00", "Conduct the Table Topic Session, call for the Timer's report, recap speakers, and remind members to vote."],
+    ["12:25", "Conduct the Table Topic Session, call for the Timer's report, recap speakers, and remind members to vote."],
   ],
   Timer: [
-    ["10:05", "Explain timing rules and timing signals for prepared speeches, Table Topics, and evaluations."],
-    ["11:00 / 11:30", "Deliver the Timer's reports when called during the Table Topic and Evaluation Sessions."],
+    ["12:05", "Explain timing rules and timing signals for prepared speeches, Table Topics, and evaluations."],
+    ["12:25 / 12:35", "Deliver the Timer's reports when called during the Table Topic and Evaluation Sessions."],
   ],
   "Ah Counter": [
-    ["10:05", "Explain the role and listen for filler words and unnecessary sounds throughout the meeting."],
-    ["11:30", "Deliver the Ah-Counter's report during the Evaluation Session."],
+    ["12:05", "Explain the role and listen for filler words and unnecessary sounds throughout the meeting."],
+    ["12:35", "Deliver the Ah-Counter's report during the Evaluation Session."],
   ],
   Grammarian: [
-    ["10:05", "Introduce the language focus and listen for effective or incorrect language usage."],
-    ["11:30", "Deliver the Grammarian's report during the Evaluation Session."],
+    ["12:05", "Introduce the language focus and listen for effective or incorrect language usage."],
+    ["12:35", "Deliver the Grammarian's report during the Evaluation Session."],
   ],
   "Word & Quote Master": [
-    ["10:05", "Introduce the Word of the Day and Quote of the Day, including meaning and usage."],
-    ["11:30", "Report how the Word of the Day was used during the meeting."],
+    ["12:05", "Introduce the Word of the Day and Quote of the Day, including meaning and usage."],
+    ["12:35", "Report how the Word of the Day was used during the meeting."],
   ],
 };
 
@@ -649,105 +628,6 @@ function addMobileLongPress(element, openEditor) {
 function activeMeeting() {
   if (!state.model) return null;
   return state.model.regularMeetings[state.model.comingMeetingIndex + state.meetingOffset] || null;
-}
-
-function initializeLibrarySettings() {
-  const get = id => document.getElementById(id);
-  const dialog = get("librarySettingsDialog");
-  const accessForm = get("libraryAccessForm");
-  const credentialForm = get("libraryCredentialForm");
-  const controls = get("librarySettingsControls");
-  const actions = get("libraryAccountActions");
-  const toggle = get("libraryAutoSwitch");
-  const bookingForm = get("libraryBookingForm");
-  const bookingDate = get("libraryBookingDate");
-  const runButton = get("libraryRunBooking");
-  const slots = [...dialog.querySelectorAll("[data-library-slot]")];
-  let accessKey = "";
-  let slot;
-  let pending = false;
-  async function update(operation, fields = {}) {
-    if (pending) return;
-    pending = true;
-    setText("librarySettingsStatus", "Working…");
-    try {
-      const result = await libraryRequest({ action: "librarySettings", operation, accessKey, ...fields });
-      if (!dialog.open) return;
-      toggle.setAttribute("aria-checked", String(result.enabled));
-      setText("libraryAutoState", result.enabled ? "On" : "Off");
-      for (const icon of slots) {
-        const occupied = result.slots.includes(Number(icon.dataset.librarySlot));
-        icon.dataset.occupied = String(occupied);
-        icon.setAttribute("aria-label", `Account ${icon.dataset.librarySlot}, ${occupied ? "registered" : "empty"}`);
-      }
-      controls.hidden = false;
-      accessForm.hidden = true;
-      actions.hidden = true;
-      credentialForm.hidden = true;
-      runButton.disabled = result.slots.length === 0;
-      setText("librarySettingsStatus", operation === "check" ? "Reservation check queued. Refresh after the workflow finishes." : "");
-    } catch (error) {
-      setText("librarySettingsStatus", error.message);
-    } finally {
-      pending = false;
-    }
-  }
-  get("requestLibraryBooking").onclick = () => {
-    if (pending) return;
-    bookingDate.setCustomValidity("");
-    bookingDate.min = sheetDateValue(new Date());
-    const date = new Date(bookingDate.min + "T00:00:00Z");
-    date.setUTCDate(date.getUTCDate() + (7 - date.getUTCDay()) % 7);
-    bookingDate.value = date.toISOString().slice(0, 10);
-    dialog.showModal();
-  };
-  get("closeLibrarySettings").onclick = () => dialog.close();
-  dialog.addEventListener("close", () => {
-    accessKey = "";
-    accessForm.reset();
-    credentialForm.reset();
-    accessForm.hidden = false;
-    controls.hidden = true;
-    setText("librarySettingsStatus", "");
-  });
-  accessForm.onsubmit = event => {
-    event.preventDefault();
-    if (pending) return;
-    accessKey = accessForm.elements.accessKey.value;
-    accessForm.reset();
-    update("read");
-  };
-  toggle.onclick = () => update("toggle", { enabled: toggle.getAttribute("aria-checked") !== "true" });
-  bookingDate.oninput = () => bookingDate.setCustomValidity("");
-  bookingForm.onsubmit = event => {
-    event.preventDefault();
-    if (pending) return;
-    const date = bookingDate.value;
-    if (new Date(date + "T00:00:00Z").getUTCDay() !== 0) {
-      bookingDate.setCustomValidity("Choose a Sunday.");
-      bookingDate.reportValidity();
-      return;
-    }
-    update("check", { date });
-  };
-  for (const icon of slots) icon.onclick = () => {
-    if (pending) return;
-    slot = Number(icon.dataset.librarySlot);
-    setText("libraryAccountQuestion", `Manage account ${slot}`);
-    get("deleteLibraryAccount").disabled = icon.dataset.occupied !== "true";
-    actions.hidden = false;
-    credentialForm.reset();
-    credentialForm.hidden = true;
-  };
-  get("enterLibraryAccount").onclick = () => { credentialForm.hidden = false; credentialForm.elements.username.focus(); };
-  get("deleteLibraryAccount").onclick = () => update("delete", { slot });
-  credentialForm.onsubmit = event => {
-    event.preventDefault();
-    if (pending || !window.confirm("Has the account owner agreed to let YTTM use this account for library bookings?")) return;
-    const { username, password } = Object.fromEntries(new FormData(credentialForm));
-    credentialForm.reset();
-    update("save", { slot, username, password });
-  };
 }
 
 function canEditActiveMeeting() {
@@ -1225,22 +1105,6 @@ function renderSpeeches(model) {
 function renderThisWeek(model) {
   updateMeetingArrowControls();
   const meeting = activeMeeting();
-  const bookingIcon = document.getElementById("libraryBookingStatus");
-  bookingIcon.hidden = !meeting || meeting.noMeeting;
-  const bookingDate = bookingIcon.hidden ? "" : sheetDateValue(meeting.date);
-  const updateBookingIcon = (status = "unknown") => {
-    const label = { success: "도서관 예약 승인 확인", failed: "도서관 승인 내역 없음", unknown: "도서관 예약 확인 필요" }[status];
-    bookingIcon.dataset.status = status;
-    bookingIcon.title = label;
-    bookingIcon.setAttribute("aria-label", label);
-  };
-  if (bookingIcon.dataset.date !== bookingDate) updateBookingIcon();
-  bookingIcon.dataset.date = bookingDate;
-  if (bookingDate) {
-    libraryRequest({ action: "status", date: bookingDate }).then(({ status }) => {
-      if (bookingIcon.dataset.date === bookingDate) updateBookingIcon(status);
-    }).catch(() => {});
-  }
   document.getElementById('roleSuggestionsButton').disabled = !canEditActiveMeeting() || !meeting || meeting.noMeeting || !WRITE_ENDPOINT;
   renderAttendees();
   document.querySelectorAll("[data-edit-section]").forEach(button => {
@@ -1968,6 +1832,5 @@ document.addEventListener("click", event => {
 const initialTab = ({ "#past-meeting": "past", "#coming-up": "coming", "#next-meeting": "next" })[location.hash] || "coming";
 initializeMeetingPeople();
 initializeRoleSuggestions();
-initializeLibrarySettings();
 setActiveTab(initialTab, false);
 loadDashboard(false);
