@@ -1,0 +1,1982 @@
+const state = { model: null, member: "all", role: "all", meetingView: "coming", meetingOffset: 0, sharedDrafts: { revision: 0, updatedAt: "", meetings: {}, locks: {}, fieldVersions: {} }, sheetBaseValues: {} };
+const SHEET_ID = "1_I9lmaPePJYkBaiUkloi5aLQAajVd5NJ3WpC2fv-TD8";
+const SHEET_SOURCE = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit?gid=0`;
+const WRITE_ENDPOINT = clean(window.YTTM_CONFIG?.writeEndpoint);
+const LIBRARY_ENDPOINT = clean(window.YTTM_CONFIG?.libraryEndpoint);
+const THEME_EDIT_FIELDS = ["Theme", "Theme Question", "Word of the day", "Quote of the day"];
+const SPECIAL_EDIT_FIELDS = ["Special Event"];
+const AWARD_EDIT_FIELDS = ["Best Speaker", "Best evaluator", "Best table topic speaker"];
+const AWARD_DISPLAY_LABELS = {
+  "Best Speaker": "Best Speaker",
+  "Best evaluator": "Best Evaluator",
+  "Best table topic speaker": "Best Table Topic Speaker",
+};
+const ROLE_EDIT_FIELDS = [
+  "Chairperson", "Toastmaster", "General Evaluator", "Table Topic Master", "Timer",
+  "Ah Counter", "Grammarian", "Word & Quote Master", "Quiz Master", "Table Topic Evaluator",
+];
+
+async function libraryRequest(payload) {
+  if (!LIBRARY_ENDPOINT) throw new Error("예약 서버 설정이 필요합니다.");
+  const response = await fetch(LIBRARY_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(12000),
+  });
+  const result = await response.json();
+  if (!response.ok || !result.ok) throw new Error(result.error || "예약 서버 요청에 실패했습니다.");
+  return result;
+}
+
+async function apiRequest(payload) {
+  if (!WRITE_ENDPOINT) throw new Error("The shared draft service is not configured.");
+  const requestId = payload.requestId || newSaveRequestId();
+  await fetch(WRITE_ENDPOINT, {
+    method: "POST",
+    mode: "no-cors",
+    credentials: "include",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ ...payload, requestId }),
+  });
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 500));
+    const result = await jsonpRequest("status", { requestId });
+    if (!result.pending) {
+      if (!result.ok) {
+        const error = new Error(result.error || "The request was rejected.");
+        error.result = result;
+        throw error;
+      }
+      return result;
+    }
+  }
+  throw new Error("The shared draft service did not confirm the request.");
+}
+
+function jsonpRequest(action, parameters = {}) {
+  if (!WRITE_ENDPOINT) return Promise.reject(new Error("The shared draft service is not configured."));
+  return new Promise((resolve, reject) => {
+    const callback = `yttmJsonp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const script = document.createElement("script");
+    const timeout = setTimeout(() => finish(new Error("The shared draft service timed out.")), 10000);
+    const finish = (error, value) => {
+      clearTimeout(timeout);
+      delete window[callback];
+      script.remove();
+      if (error) reject(error); else resolve(value);
+    };
+    window[callback] = value => finish(null, value);
+    script.onerror = () => finish(new Error("Unable to reach the shared draft service."));
+    const query = new URLSearchParams({ action, callback, _: Date.now(), ...parameters });
+    script.src = `${WRITE_ENDPOINT}?${query}`;
+    document.head.appendChild(script);
+  });
+}
+
+async function fetchSharedDrafts() {
+  if (!WRITE_ENDPOINT) return { revision: 0, updatedAt: "", meetings: {}, locks: {}, fieldVersions: {} };
+  const result = await jsonpRequest("getDrafts");
+  if (!result.ok) throw new Error(result.error || "Unable to load shared drafts.");
+  return result.drafts || { revision: 0, updatedAt: "", meetings: {}, locks: {}, fieldVersions: {} };
+}
+
+function sharedDraftEntries() {
+  return Object.entries(state.sharedDrafts.meetings || {}).flatMap(([meetingDate, sections]) =>
+    Object.entries(sections || {}).flatMap(([section, updates]) =>
+      Object.entries(updates || {}).map(([label, value]) => ({ meetingDate, section, label, value }))));
+}
+
+function renderDraftSyncState() {
+  const entries = sharedDraftEntries();
+  const badge = document.getElementById("draftSyncBadge");
+  const button = document.getElementById("applySheetsButton");
+  const pending = entries.length > 0;
+  badge.className = `draft-sync-badge ${pending ? "pending" : "synced"}`;
+  badge.textContent = pending ? `Shared draft pending · ${entries.length}` : WRITE_ENDPOINT ? "Google Sheet synced" : "Read only";
+  button.classList.toggle("pending", pending);
+  button.disabled = !WRITE_ENDPOINT || !pending;
+  button.textContent = pending ? `Apply ${entries.length} change${entries.length === 1 ? "" : "s"}` : WRITE_ENDPOINT ? "Google Sheet up to date" : "Sheet saving unavailable";
+  renderLocalSaveState();
+  button.title = button.textContent;
+}
+
+function applySharedDraftsToRows(rolesRows, drafts) {
+  const dateColumns = new Map((rolesRows[0] || []).map((value, col) => [clean(value), col]));
+  const rows = rowMap(rolesRows);
+  Object.entries(drafts.meetings || {}).forEach(([meetingDate, sections]) => {
+    const col = dateColumns.get(meetingDate);
+    if (col == null) return;
+    Object.values(sections || {}).forEach(updates => {
+      Object.entries(updates || {}).forEach(([label, value]) => {
+        const target = rows.get(label)?.row;
+        if (target) target[col] = value;
+        else if (label === "Attendees") {
+          const row = [label];
+          row[col] = value;
+          rolesRows.push(row);
+          rows.set(label, { row });
+        }
+      });
+    });
+  });
+}
+
+function captureSheetBaseValues(rolesRows) {
+  const dates = rolesRows[0] || [];
+  const values = {};
+  rolesRows.slice(1).forEach(row => {
+    const label = clean(row[0]);
+    if (!label) return;
+    for (let col = 1; col < dates.length; col += 1) {
+      const meetingDate = clean(dates[col]);
+      if (!meetingDate) continue;
+      values[meetingDate] ||= {};
+      values[meetingDate][label] = clean(row[col]);
+    }
+  });
+  state.sheetBaseValues = values;
+}
+
+async function fetchPublicSheets() {
+  if (WRITE_ENDPOINT) {
+    try {
+      const livePayload = await jsonpRequest("getSheets");
+      if (livePayload?.ok && livePayload.source === SHEET_SOURCE && typeof livePayload.rolesCsv === "string" && typeof livePayload.agendaCsv === "string") {
+        return livePayload;
+      }
+      if (livePayload?.error) console.warn("Live sheet endpoint returned an error.", livePayload.error);
+    } catch (error) {
+      console.warn("Live sheet endpoint unavailable; using the public read-only sheets endpoint.", error);
+    }
+  }
+  const base = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq`;
+  const stamp = Date.now();
+  const rolesResponse = await fetch(`${base}?gid=0&tqx=out%3Acsv&_=${stamp}`, { cache: "no-store" });
+  if (!rolesResponse.ok) throw new Error(`Google Sheets returned ${rolesResponse.status}`);
+  return {
+    rolesCsv: await rolesResponse.text(),
+    agendaCsv: "",
+    fetchedAt: new Date().toISOString(),
+    source: SHEET_SOURCE,
+  };
+}
+
+function setActiveTab(tabName, updateHash = true, scrollToTop = true) {
+  const validTabs = new Set(["past", "coming", "next"]);
+  const activeTab = validTabs.has(tabName) ? tabName : "coming";
+  const offsets = { past: -1, coming: 0, next: 1 };
+  setMeetingOffset(offsets[activeTab], updateHash, scrollToTop);
+}
+
+function setMeetingOffset(offset, updateHash = true, scrollToTop = false) {
+  let nextOffset = Number(offset || 0);
+  if (state.model) {
+    const minimum = -state.model.comingMeetingIndex;
+    const maximum = state.model.regularMeetings.length - state.model.comingMeetingIndex - 1;
+    nextOffset = Math.max(minimum, Math.min(maximum, nextOffset));
+  }
+  state.meetingOffset = nextOffset;
+  state.meetingView = nextOffset < 0 ? "past" : nextOffset > 0 ? "next" : "coming";
+  updateMeetingArrowControls();
+  document.querySelectorAll("[data-dashboard-tab]").forEach(button => {
+    button.setAttribute("aria-selected", String(button.dataset.dashboardTab === state.meetingView));
+  });
+  document.querySelectorAll("[data-tab-panel]").forEach(panel => {
+    panel.hidden = panel.dataset.tabPanel !== "week";
+  });
+  if (state.model) renderThisWeek(state.model);
+  if (updateHash) {
+    const hashes = { past: "#past-meeting", coming: "#coming-up", next: "#next-meeting" };
+    history.replaceState(null, "", hashes[state.meetingView]);
+  }
+  if (scrollToTop) window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+const ROLE_LABELS = [
+  "Chairperson", "Toastmaster", "General Evaluator", "Table Topic Master",
+  "Timer", "Ah Counter", "Grammarian", "Word & Quote Master", "Quiz Master",
+  "Table Topic Evaluator", "Speaker", "Evaluator",
+];
+
+const AGENDA_FALLBACK = [
+  ["09:50", "Icebreaking", "Members & guests"],
+  ["10:00", "Introduction", "Chairperson"],
+  ["10:05", "Toastmaster's Session", "Theme & role introductions"],
+  ["10:20", "Prepared Speech Session", "Speakers & evaluators"],
+  ["10:50", "Q & A Session", "Questions to speakers"],
+  ["11:00", "Break", "10 minutes"],
+  ["11:10", "Table Topics", "Impromptu speaking"],
+  ["11:30", "Evaluation Session", "Evaluations & reports"],
+  ["11:55", "Announcement Session", "Awards & announcements"],
+  ["12:00", "Closing", "Chairperson"],
+];
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [], value = "", quoted = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (quoted) {
+      if (char === '"' && text[i + 1] === '"') { value += '"'; i += 1; }
+      else if (char === '"') quoted = false;
+      else value += char;
+    } else if (char === '"') quoted = true;
+    else if (char === ",") { row.push(value); value = ""; }
+    else if (char === "\n") { row.push(value.replace(/\r$/, "")); rows.push(row); row = []; value = ""; }
+    else value += char;
+  }
+  if (value || row.length) { row.push(value.replace(/\r$/, "")); rows.push(row); }
+  return rows;
+}
+
+function clean(value) { return String(value ?? "").trim(); }
+function normalizeName(value) {
+  let name = assignmentName(value).replace(/\s*\([^)]*\)\s*$/, "").trim();
+  const aliases = { Shilry: "Shirly", EunJeong: "Eunjeong", "Q-Sun": "Q Sun", Stella: "Stella Yang" };
+  name = aliases[name] || name;
+  const blocked = /^(no meeting|education|speech contest|area |division |district |february|[-~])|session$/i;
+  return !name || blocked.test(name) ? "" : name;
+}
+function parseDate(value) {
+  const match = clean(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return match ? new Date(`${match[1]}-${match[2]}-${match[3]}T00:00:00+09:00`) : null;
+}
+function todayKst(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
+  const map = Object.fromEntries(parts.map(p => [p.type, p.value]));
+  return new Date(`${map.year}-${map.month}-${map.day}T00:00:00+09:00`);
+}
+function meetingReferenceDateKst(now = new Date()) {
+  const today = todayKst(now);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Seoul",
+    weekday: "short",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(now);
+  const map = Object.fromEntries(parts.map(p => [p.type, p.value]));
+  if (map.weekday === "Sun" && Number(map.hour) >= 13) {
+    return new Date(today.getTime() + 24 * 60 * 60 * 1000);
+  }
+  return today;
+}
+function formatDate(date, options = {}) {
+  return new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Seoul", month: "long", day: "numeric", weekday: "short", ...options }).format(date);
+}
+function formatMeetingDate(date) {
+  return new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric" }).format(date);
+}
+function sheetDateValue(date) {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+  const map = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${map.year}-${map.month}-${map.day}`;
+}
+function canonicalRole(label) {
+  const value = clean(label);
+  if (/^Speaker \d+$/i.test(value)) return "Speaker";
+  if (/^Evaluator \d+$/i.test(value)) return "Evaluator";
+  const map = {
+    "Table Topic Master": "Table Topic Master",
+    "Table Topics Master": "Table Topic Master",
+    "Ah counter": "Ah Counter",
+    "Table Topic evaluator": "Table Topic Evaluator",
+  };
+  return map[value] || value;
+}
+function isRoleRow(label) { return ROLE_LABELS.includes(canonicalRole(label)); }
+function rowMap(rows) { return new Map(rows.map((row, index) => [clean(row[0]), { row, index }])); }
+
+function buildModel(rolesRows, agendaRows) {
+  const rowsByLabel = rowMap(rolesRows);
+  const dates = rolesRows[0] || [];
+  const meetingNos = rolesRows[1] || [];
+  const today = todayKst();
+  const meetingReferenceDate = meetingReferenceDateKst();
+  const columns = [];
+  for (let col = 1; col < dates.length; col += 1) {
+    const date = parseDate(dates[col]);
+    if (!date) continue;
+    const special = clean(rowsByLabel.get("Special Event")?.row[col]);
+    const chair = clean(rowsByLabel.get("Chairperson")?.row[col]);
+    const noMeeting = /no meeting/i.test(`${special} ${chair}`);
+    columns.push({ col, date, meetingNo: clean(meetingNos[col]), special, noMeeting });
+  }
+
+  const completedColumns = columns.filter(c => c.date < meetingReferenceDate && !c.noMeeting).filter(c => {
+    const anchors = ["Chairperson", "Toastmaster", "General Evaluator", "Speaker 1"];
+    return anchors.filter(label => confirmedAssignment(rowsByLabel.get(label)?.row[c.col])).length >= 3;
+  });
+  const completedSet = new Set(completedColumns.map(c => c.col));
+  const previousEditableMeeting = columns.filter(c => c.date < meetingReferenceDate && !c.noMeeting).at(-1) || null;
+  const upcomingMeetings = columns.filter(c => c.date >= meetingReferenceDate && !c.noMeeting);
+  const comingMeeting = upcomingMeetings[0] || columns.filter(c => !c.noMeeting).at(-1);
+  const followingMeeting = upcomingMeetings[1] || null;
+  // Keep no-meeting dates in the navigation so their date, number, and special
+  // event can still be shown. Completed/history aggregates continue to exclude them.
+  const regularMeetings = columns;
+  const comingMeetingIndex = Math.max(0, regularMeetings.findIndex(c => c.col === comingMeeting?.col));
+  const assignments = [];
+  const searchAssignments = [];
+  const speeches = [];
+
+  rolesRows.forEach(row => {
+    const sourceLabel = clean(row[0]);
+    if (!isRoleRow(sourceLabel)) return;
+    const role = canonicalRole(sourceLabel);
+    columns.forEach(column => {
+      if (column.noMeeting) return;
+      const member = normalizeName(row[column.col]);
+      if (!member) return;
+      searchAssignments.push({ member, role, sourceLabel, label: role, value: member, kind: "role", groupKey: `member:${member}`, groupLabel: member, date: column.date, meetingNo: column.meetingNo, col: column.col });
+    });
+    completedColumns.forEach(column => {
+      if (isTentative(row[column.col])) return;
+      const member = normalizeName(row[column.col]);
+      if (!member) return;
+      assignments.push({ member, role, sourceLabel, date: column.date, meetingNo: column.meetingNo, col: column.col });
+    });
+  });
+
+  const contentSearchFields = [["Theme", "Theme"], ["Theme Question", "Theme Question"], ["Word of the day", "Word of the day"], ["Quote of the day", "Quote of the day"]];
+  columns.forEach(column => {
+    if (column.noMeeting) return;
+    const groupLabel = `${formatMeetingDate(column.date)} Meeting${column.meetingNo ? ` · ${column.meetingNo}` : ""}`;
+    contentSearchFields.forEach(([rowLabel, label]) => {
+      const value = clean(rowsByLabel.get(rowLabel)?.row[column.col]);
+      if (!value) return;
+      searchAssignments.push({ member: "", role: "", sourceLabel: label, label, value, kind: "meeting", groupKey: `meeting:${column.col}`, groupLabel, date: column.date, meetingNo: column.meetingNo, col: column.col });
+    });
+  });
+
+  for (let number = 1; number <= 4; number += 1) {
+    const speakerRow = rowsByLabel.get(`Speaker ${number}`)?.row || [];
+    const projectRow = rowsByLabel.get(`Project ${number}`)?.row || [];
+    const titleRow = rowsByLabel.get(`Title ${number}`)?.row || [];
+    const timeRow = rowsByLabel.get(`Time ${number}`)?.row || [];
+    const evaluatorRow = rowsByLabel.get(`Evaluator ${number}`)?.row || [];
+    columns.forEach(column => {
+      if (column.noMeeting) return;
+      const speaker = normalizeName(speakerRow[column.col]);
+      const fields = [["Speech presenter", speaker], ["Project", clean(projectRow[column.col])], ["Speech title", clean(titleRow[column.col])], ["Speech time", clean(timeRow[column.col])], ["Evaluator", normalizeName(evaluatorRow[column.col])]];
+      const meetingLabel = `${formatMeetingDate(column.date)} Meeting${column.meetingNo ? ` · ${column.meetingNo}` : ""}`;
+      fields.forEach(([label, value]) => {
+        if (!value) return;
+        searchAssignments.push({ member: speaker, role: "", sourceLabel: label, label, value, kind: "speech", groupKey: speaker ? `member:${speaker}` : `meeting:${column.col}`, groupLabel: speaker || meetingLabel, date: column.date, meetingNo: column.meetingNo, col: column.col });
+      });
+    });
+    completedColumns.forEach(column => {
+      if (isTentative(speakerRow[column.col])) return;
+      const speaker = normalizeName(speakerRow[column.col]);
+      if (!speaker) return;
+      speeches.push({
+        speaker,
+        date: column.date,
+        meetingNo: column.meetingNo,
+        slot: number,
+        project: clean(projectRow[column.col]),
+        title: clean(titleRow[column.col]) || "Untitled speech",
+        time: clean(timeRow[column.col]),
+        evaluator: normalizeName(evaluatorRow[column.col]),
+      });
+    });
+  }
+
+  const members = new Map();
+  assignments.forEach(item => {
+    if (!members.has(item.member)) members.set(item.member, { name: item.member, roles: [], speeches: [] });
+    members.get(item.member).roles.push(item);
+  });
+  speeches.forEach(item => {
+    if (!members.has(item.speaker)) members.set(item.speaker, { name: item.speaker, roles: [], speeches: [] });
+    members.get(item.speaker).speeches.push(item);
+  });
+
+  return {
+    today, rowsByLabel, columns, regularMeetings, comingMeetingIndex, completedColumns, completedSet, previousEditableMeeting, comingMeeting, followingMeeting,
+    assignments, searchAssignments, speeches, members: [...members.values()], agenda: extractAgenda(agendaRows),
+  };
+}
+
+function extractAgenda(rows) {
+  const items = rows.flatMap(row => {
+    const time = clean(row[1]);
+    const description = clean(row[2]);
+    if (!/^\d{1,2}:\d{2}$/.test(time) || !description) return [];
+    const title = description.replace(/^\[\s*\d+mins?\]\s*/i, "").trim();
+    return [[time.padStart(5, "0"), title, "26_Agenda"]];
+  });
+  const unique = [...new Map(items.map(item => [`${item[0]}-${item[1]}`, item])).values()];
+  return unique.length >= 6 ? unique : AGENDA_FALLBACK;
+}
+
+function detailedAgenda(model, meeting) {
+  const memberFor = label => displayAssignment(model.rowsByLabel.get(label)?.row[meeting.col]);
+  const combinedMembers = labels => [...new Set(labels.map(memberFor))].join(" / ");
+  const speeches = [];
+  for (let number = 1; number <= 4; number += 1) {
+    const speaker = normalizeName(model.rowsByLabel.get(`Speaker ${number}`)?.row[meeting.col]);
+    if (number > 1 && !speaker) continue;
+    speeches.push([
+      displayAssignment(model.rowsByLabel.get(`Speaker ${number}`)?.row[meeting.col]),
+      clean(model.rowsByLabel.get(`Project ${number}`)?.row[meeting.col]) || "Pending",
+      clean(model.rowsByLabel.get(`Title ${number}`)?.row[meeting.col]) || "Pending",
+      clean(model.rowsByLabel.get(`Time ${number}`)?.row[meeting.col]) || "Pending",
+      displayAssignment(model.rowsByLabel.get(`Evaluator ${number}`)?.row[meeting.col]),
+    ]);
+  }
+  return [
+    {
+      time: "10:00", title: "Chair Calls Meeting to Order", ownerRole: "Chairperson", owner: memberFor("Chairperson"),
+      bullets: ["Chair's Welcome", "Read Mission Statement", "Introduction of Toastmasters Club Meeting"],
+    },
+    {
+      time: "10:05", title: "Toastmaster Calls on Meeting Roles", ownerRole: "Toastmaster", owner: memberFor("Toastmaster"),
+      table: {
+        headers: ["Role", "Person"],
+        rows: [
+          ["General Evaluator", memberFor("General Evaluator")],
+          ["Table Topic Evaluator", memberFor("Table Topic Evaluator")],
+          ["Grammarian + The Word and Quote Master", combinedMembers(["Grammarian", "Word & Quote Master"])],
+          ["Ah-Counter", memberFor("Ah Counter")],
+          ["Timer", memberFor("Timer")],
+          ["Quiz Master", memberFor("Quiz Master")],
+        ],
+      },
+    },
+    {
+      time: "10:20", title: "Prepared Speech Session", ownerRole: "Toastmaster", owner: memberFor("Toastmaster"),
+      table: { headers: ["Speaker", "Project", "Speech Title", "Time", "Evaluator"], rows: speeches },
+      note: "1 min silence after each speech",
+    },
+    {
+      time: "10:50", title: "Break", owner: "",
+      bullets: ["Deliver feedback to speaker and transfer meeting fee (check left account information)"],
+    },
+    {
+      time: "11:00", title: "Table Topic Session", ownerRole: "Table Topic Master", owner: memberFor("Table Topic Master"),
+      bullets: ["Conduct Table Topics Session", "Call for Timer's Report", "Recap Speakers and Give Reminder to Vote"],
+    },
+    {
+      time: "11:30", title: "Evaluation Session", ownerRole: "General Evaluator", owner: memberFor("General Evaluator"),
+      bullets: ["Speech Evaluation (2-3 min per speech)", "Call for Timer's Report"],
+      table: {
+        headers: ["Report", "Person"],
+        rows: [
+          ["Ah-Counter's report", memberFor("Ah Counter")],
+          ["Grammarian's report", memberFor("Grammarian")],
+          ["Table Topic Evaluator", memberFor("Table Topic Evaluator")],
+          ["Quiz Master", memberFor("Quiz Master")],
+          ["General Evaluator's report", memberFor("General Evaluator")],
+        ],
+      },
+    },
+    {
+      time: "11:50", title: "Awards Session", ownerRole: "Toastmaster", owner: memberFor("Toastmaster"),
+      bullets: ["Awards", "Closing remarks"],
+    },
+    {
+      time: "11:55", title: "Closing", ownerRole: "Chairperson", owner: memberFor("Chairperson"),
+      bullets: ["Next Meeting", "Announcement and Meeting Role Sign-up", "Guest Feedback and Group Photo"],
+    },
+  ];
+}
+
+function agendaDetailHtml(item) {
+  const owner = item.owner ? `<p class="agenda-dialog-owner">${escapeHtml(item.ownerRole || "Host")} · <strong>${escapeHtml(item.owner)}</strong></p>` : "";
+  const bullets = item.bullets?.length
+    ? `<ul class="agenda-bullets">${item.bullets.map(bullet => `<li>${escapeHtml(bullet)}</li>`).join("")}</ul>`
+    : "";
+  const isSpeechTable = item.table?.headers.length > 2;
+  const table = item.table
+    ? `<div class="agenda-table-wrap ${isSpeechTable ? "speech-agenda-table-wrap" : ""}"><table class="agenda-table ${isSpeechTable ? "speech-agenda-table" : ""}"><thead><tr>${item.table.headers.map(header => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead><tbody>${item.table.rows.map(row => `<tr>${row.map((value, index) => `<td data-label="${escapeHtml(item.table.headers[index])}" class="${value === "Pending" ? "pending" : ""}">${escapeHtml(value)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`
+    : "";
+  const note = item.note ? `<p class="agenda-note">${escapeHtml(item.note)}</p>` : "";
+  return `${owner}${bullets}${table}${note}`;
+}
+
+function renderCompactAgenda(model, meeting) {
+  const items = detailedAgenda(model, meeting);
+  const container = document.getElementById("agendaTimeline");
+  container.innerHTML = items.map((item, index) => {
+    const summary = item.owner ? `${item.ownerRole || "Host"} · ${item.owner}` : "Open session details";
+    return `<button type="button" class="agenda-item agenda-item-button" data-agenda-index="${index}" aria-haspopup="dialog"><span class="agenda-time">${escapeHtml(item.time)}</span><span class="agenda-line"></span><span class="agenda-copy"><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(summary)}</small></span></button>`;
+  }).join("");
+  container.querySelectorAll("[data-agenda-index]").forEach(button => {
+    const item = items[Number(button.dataset.agendaIndex)];
+    button.addEventListener("click", () => showAgendaDetails(item));
+    const details = [
+      `${item.time} · ${item.title}`,
+      item.owner ? `${item.ownerRole || "Host"}: ${item.owner}` : "",
+      ...(item.bullets || []).map(bullet => `• ${bullet}`),
+      ...(item.table?.rows || []).slice(0, 8).map(row => `• ${row.join(" · ")}`),
+      item.note || "",
+      "Click for full details.",
+    ].filter(Boolean).join("\n");
+    addTooltip(button, details, "detail");
+  });
+}
+
+function showAgendaDetails(item) {
+  configureDetailsEditor();
+  setText("agendaDialogEyebrow", item.time);
+  setText("agendaDialogTitle", item.title);
+  document.getElementById("agendaDialogDetails").innerHTML = agendaDetailHtml(item);
+  document.getElementById("agendaDetailsDialog").showModal();
+}
+
+function configureDetailsEditor(section = "", field = "") {
+  const actions = document.getElementById("agendaDialogActions");
+  const button = document.getElementById("agendaDialogEditButton");
+  const editable = Boolean(section) && canEditActiveMeeting();
+  if (!actions.contains(button)) actions.appendChild(button);
+  button.dataset.editSection = section;
+  button.dataset.editField = field;
+  const inlineSlot = document.querySelector("#agendaDialogDetails [data-inline-edit-slot]");
+  if (editable && inlineSlot) inlineSlot.appendChild(button);
+  actions.classList.toggle("hidden", !editable || Boolean(inlineSlot));
+  button.classList.toggle("inline-detail-edit", Boolean(inlineSlot));
+  button.hidden = !editable;
+}
+
+const ROLE_AGENDA_DUTIES = {
+  Chairperson: [
+    ["10:00", "Call the meeting to order, welcome members and guests, read the mission statement, and introduce the club meeting."],
+    ["11:55", "Close the meeting with the next meeting notice, announcements, role sign-up, guest feedback, and group photo."],
+  ],
+  Toastmaster: [
+    ["10:05", "Call on meeting role holders and introduce the meeting team."],
+    ["10:20", "Conduct the Prepared Speech Session and introduce each speaker."],
+    ["11:50", "Conduct the Awards Session and deliver closing remarks."],
+  ],
+  "General Evaluator": [
+    ["11:30", "Conduct the Evaluation Session, call speech evaluators and role reports, and deliver the General Evaluator's report."],
+  ],
+  "Table Topic Master": [
+    ["11:00", "Conduct the Table Topic Session, call for the Timer's report, recap speakers, and remind members to vote."],
+  ],
+  Timer: [
+    ["10:05", "Explain timing rules and timing signals for prepared speeches, Table Topics, and evaluations."],
+    ["11:00 / 11:30", "Deliver the Timer's reports when called during the Table Topic and Evaluation Sessions."],
+  ],
+  "Ah Counter": [
+    ["10:05", "Explain the role and listen for filler words and unnecessary sounds throughout the meeting."],
+    ["11:30", "Deliver the Ah-Counter's report during the Evaluation Session."],
+  ],
+  Grammarian: [
+    ["10:05", "Introduce the language focus and listen for effective or incorrect language usage."],
+    ["11:30", "Deliver the Grammarian's report during the Evaluation Session."],
+  ],
+  "Word & Quote Master": [
+    ["10:05", "Introduce the Word of the Day and Quote of the Day, including meaning and usage."],
+    ["11:30", "Report how the Word of the Day was used during the meeting."],
+  ],
+  "Quiz Master": [
+    ["10:05", "Explain the listening quiz and note important details throughout the meeting."],
+    ["11:30", "Conduct the quiz and deliver the Quiz Master's report."],
+  ],
+  "Table Topic Evaluator": [
+    ["11:00", "Observe Table Topic speakers and prepare concise feedback."],
+    ["11:30", "Deliver the Table Topic evaluation during the Evaluation Session."],
+  ],
+};
+
+function showRoleDetails(assignment) {
+  configureDetailsEditor();
+  const duties = ROLE_AGENDA_DUTIES[assignment.role] || [["Agenda", "Support the meeting according to the Toastmaster's instructions."]];
+  setText("agendaDialogEyebrow", "ROLE RESPONSIBILITIES");
+  setText("agendaDialogTitle", assignment.role);
+  document.getElementById("agendaDialogDetails").innerHTML = `
+    <div class="agenda-dialog-owner-row"><p class="agenda-dialog-owner">Assigned to · <strong>${isTentative(assignment.rawValue) ? "◷ " : ""}${escapeHtml(assignment.member)}${guestRoleIcon(assignment.rawValue)}</strong></p><span data-inline-edit-slot></span></div>
+    <ul class="role-duty-list">${duties.map(([time, duty]) => `<li><time>${escapeHtml(time)}</time><span>${escapeHtml(duty)}</span></li>`).join("")}</ul>`;
+  configureDetailsEditor("roles", assignment.role);
+  document.getElementById("agendaDetailsDialog").showModal();
+}
+
+function showThemeDetails(label, value) {
+  configureDetailsEditor();
+  setText("agendaDialogEyebrow", "MEETING THEME");
+  setText("agendaDialogTitle", label);
+  document.getElementById("agendaDialogDetails").innerHTML = `<div class="theme-detail-row"><div class="theme-detail-value ${value ? "" : "pending"}">${escapeHtml(value || "Pending")}</div><span data-inline-edit-slot></span></div>`;
+  configureDetailsEditor("theme", label);
+  document.getElementById("agendaDetailsDialog").showModal();
+}
+
+function showAwardDetails(label, value) {
+  configureDetailsEditor();
+  setText("agendaDialogEyebrow", "MEETING AWARD");
+  setText("agendaDialogTitle", AWARD_DISPLAY_LABELS[label] || label);
+  document.getElementById("agendaDialogDetails").innerHTML = `<div class="award-detail-row"><div class="award-detail-value ${value ? "" : "pending"}">${escapeHtml(value || "Not selected")}</div><span data-inline-edit-slot></span></div>`;
+  configureDetailsEditor("awards", label);
+  document.getElementById("agendaDetailsDialog").showModal();
+}
+
+let suppressLongPressClickUntil = 0;
+function addMobileLongPress(element, openEditor) {
+  let timer = null;
+  let triggered = false;
+  let startX = 0;
+  let startY = 0;
+  const cancel = () => {
+    clearTimeout(timer);
+    timer = null;
+    triggered = false;
+    element.classList.remove("long-pressing");
+  };
+  element.addEventListener("touchstart", event => {
+    if (event.touches.length !== 1 || !canEditActiveMeeting() || window.innerWidth > 700) return;
+    const touch = event.touches[0];
+    triggered = false;
+    startX = touch.clientX;
+    startY = touch.clientY;
+    timer = window.setTimeout(() => {
+      timer = null;
+      triggered = true;
+      element.classList.add("long-pressing");
+      navigator.vibrate?.(35);
+    }, 480);
+    window.setTimeout(() => { if (timer) element.classList.add("long-pressing"); }, 260);
+  }, { passive: true });
+  element.addEventListener("touchmove", event => {
+    if ((!timer && !triggered) || event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    if (Math.hypot(touch.clientX - startX, touch.clientY - startY) > 10) cancel();
+  }, { passive: true });
+  element.addEventListener("touchend", () => {
+    const shouldOpen = triggered;
+    cancel();
+    if (!shouldOpen) return;
+    suppressLongPressClickUntil = Date.now() + 700;
+    window.getSelection()?.removeAllRanges();
+    window.setTimeout(() => {
+      openEditor();
+      window.getSelection()?.removeAllRanges();
+    }, 0);
+  }, { passive: true });
+  element.addEventListener("touchcancel", cancel, { passive: true });
+  element.addEventListener("contextmenu", event => {
+    if (window.innerWidth <= 700) event.preventDefault();
+  });
+}
+
+function activeMeeting() {
+  if (!state.model) return null;
+  return state.model.regularMeetings[state.model.comingMeetingIndex + state.meetingOffset] || null;
+}
+
+function initializeLibrarySettings() {
+  const get = id => document.getElementById(id);
+  const dialog = get("librarySettingsDialog");
+  const accessForm = get("libraryAccessForm");
+  const credentialForm = get("libraryCredentialForm");
+  const controls = get("librarySettingsControls");
+  const actions = get("libraryAccountActions");
+  const toggle = get("libraryAutoSwitch");
+  const bookingForm = get("libraryBookingForm");
+  const bookingDate = get("libraryBookingDate");
+  const runButton = get("libraryRunBooking");
+  const slots = [...dialog.querySelectorAll("[data-library-slot]")];
+  let accessKey = "";
+  let slot;
+  let pending = false;
+  async function update(operation, fields = {}) {
+    if (pending) return;
+    pending = true;
+    setText("librarySettingsStatus", "Working…");
+    try {
+      const result = await libraryRequest({ action: "librarySettings", operation, accessKey, ...fields });
+      if (!dialog.open) return;
+      toggle.setAttribute("aria-checked", String(result.enabled));
+      setText("libraryAutoState", result.enabled ? "On" : "Off");
+      for (const icon of slots) {
+        const occupied = result.slots.includes(Number(icon.dataset.librarySlot));
+        icon.dataset.occupied = String(occupied);
+        icon.setAttribute("aria-label", `Account ${icon.dataset.librarySlot}, ${occupied ? "registered" : "empty"}`);
+      }
+      controls.hidden = false;
+      accessForm.hidden = true;
+      actions.hidden = true;
+      credentialForm.hidden = true;
+      runButton.disabled = result.slots.length === 0;
+      setText("librarySettingsStatus", operation === "check" ? "Reservation check queued. Refresh after the workflow finishes." : "");
+    } catch (error) {
+      setText("librarySettingsStatus", error.message);
+    } finally {
+      pending = false;
+    }
+  }
+  get("requestLibraryBooking").onclick = () => {
+    if (pending) return;
+    bookingDate.setCustomValidity("");
+    bookingDate.min = sheetDateValue(new Date());
+    const date = new Date(bookingDate.min + "T00:00:00Z");
+    date.setUTCDate(date.getUTCDate() + (7 - date.getUTCDay()) % 7);
+    bookingDate.value = date.toISOString().slice(0, 10);
+    dialog.showModal();
+  };
+  get("closeLibrarySettings").onclick = () => dialog.close();
+  dialog.addEventListener("close", () => {
+    accessKey = "";
+    accessForm.reset();
+    credentialForm.reset();
+    accessForm.hidden = false;
+    controls.hidden = true;
+    setText("librarySettingsStatus", "");
+  });
+  accessForm.onsubmit = event => {
+    event.preventDefault();
+    if (pending) return;
+    accessKey = accessForm.elements.accessKey.value;
+    accessForm.reset();
+    update("read");
+  };
+  toggle.onclick = () => update("toggle", { enabled: toggle.getAttribute("aria-checked") !== "true" });
+  bookingDate.oninput = () => bookingDate.setCustomValidity("");
+  bookingForm.onsubmit = event => {
+    event.preventDefault();
+    if (pending) return;
+    const date = bookingDate.value;
+    if (new Date(date + "T00:00:00Z").getUTCDay() !== 0) {
+      bookingDate.setCustomValidity("Choose a Sunday.");
+      bookingDate.reportValidity();
+      return;
+    }
+    update("check", { date });
+  };
+  for (const icon of slots) icon.onclick = () => {
+    if (pending) return;
+    slot = Number(icon.dataset.librarySlot);
+    setText("libraryAccountQuestion", `Manage account ${slot}`);
+    get("deleteLibraryAccount").disabled = icon.dataset.occupied !== "true";
+    actions.hidden = false;
+    credentialForm.reset();
+    credentialForm.hidden = true;
+  };
+  get("enterLibraryAccount").onclick = () => { credentialForm.hidden = false; credentialForm.elements.username.focus(); };
+  get("deleteLibraryAccount").onclick = () => update("delete", { slot });
+  credentialForm.onsubmit = event => {
+    event.preventDefault();
+    if (pending || !window.confirm("Has the account owner agreed to let YTTM use this account for library bookings?")) return;
+    const { username, password } = Object.fromEntries(new FormData(credentialForm));
+    credentialForm.reset();
+    update("save", { slot, username, password });
+  };
+}
+
+function canEditActiveMeeting() {
+  const meeting = activeMeeting();
+  return Boolean(meeting) && (meeting.date >= meetingReferenceDateKst() || meeting.col === state.model.previousEditableMeeting?.col);
+}
+
+function editableValue(meeting, label) {
+  return clean(state.model.rowsByLabel.get(label)?.row[meeting.col]);
+}
+
+function editFieldHtml(meeting, label) {
+  const value = editableValue(meeting, label);
+  const assignment = isAssignmentField(label);
+  const inputValue = assignment ? assignmentPersonName(value) : value;
+  const id = `edit-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  return `<div class="meeting-edit-field"><label for="${id}">${escapeHtml(label)}</label><div><input id="${id}" name="${escapeHtml(label)}" data-edit-field="${escapeHtml(label)}" data-initial-value="${escapeHtml(value)}" value="${escapeHtml(inputValue)}" maxlength="${assignment ? 498 : 500}" autocomplete="off">${assignment ? `<button type="button" class="tentative-toggle" data-tentative-field="${escapeHtml(label)}" aria-pressed="${isTentative(value)}" title="예정 배정" aria-label="${escapeHtml(label)} 예정 배정">◷</button>` : ""}<button type="button" class="clear-field-button" data-clear-field="${escapeHtml(label)}" aria-label="Clear ${escapeHtml(label)}">Clear</button></div></div>`;
+}
+
+let dashboardLoadVersion = 0;
+
+function activeEditApiSection() {
+  return state.editSection === "awards" ? "roles" : state.editSection;
+}
+
+function openMeetingEditor(section, field = "", speechSlot = null, originItem = null) {
+  const meeting = activeMeeting();
+  if (!meeting || !canEditActiveMeeting()) return;
+  state.editSection = section;
+  state.editMeeting = meeting;
+  state.editFieldVersions = localFieldVersions();
+  state.editOriginSpeechItem = originItem;
+  const titles = { theme: "Meeting theme", special: "Special Event", roles: "Role assignments", speeches: "Prepared speeches", awards: "Meeting awards" };
+  setText("meetingEditEyebrow", `${formatMeetingDate(meeting.date)} MEETING · ${meeting.meetingNo || ""}`);
+  const displayField = section === "awards" && field ? (AWARD_DISPLAY_LABELS[field] || field) : field;
+  setText("meetingEditTitle", `Edit ${displayField || (speechSlot ? `Speaker ${speechSlot} speech` : titles[section])}`);
+  let content = "";
+  if (section === "theme") {
+    const fields = field && THEME_EDIT_FIELDS.includes(field) ? [field] : THEME_EDIT_FIELDS;
+    content = fields.map(label => editFieldHtml(meeting, label)).join("");
+  }
+  if (section === "special") {
+    const fields = field && SPECIAL_EDIT_FIELDS.includes(field) ? [field] : SPECIAL_EDIT_FIELDS;
+    content = fields.map(label => editFieldHtml(meeting, label)).join("");
+  }
+  if (section === "roles") {
+    const fields = field && ROLE_EDIT_FIELDS.includes(field) ? [field] : ROLE_EDIT_FIELDS;
+    content = fields.map(label => editFieldHtml(meeting, label)).join("");
+  }
+  if (section === "awards") {
+    const fields = field && AWARD_EDIT_FIELDS.includes(field) ? [field] : AWARD_EDIT_FIELDS;
+    content = fields.map(label => editFieldHtml(meeting, label)).join("");
+  }
+  if (section === "speeches") {
+    const slots = speechSlot ? [Number(speechSlot)] : [1, 2, 3, 4];
+    content = slots.map(number => {
+      const speechFields = [`Speaker ${number}`, `Project ${number}`, `Title ${number}`, `Time ${number}`, `Evaluator ${number}`];
+      const visibleFields = field && speechFields.includes(field) ? [field] : speechFields;
+      return `<fieldset class="speech-edit-group"><legend>Speaker ${number}</legend>${visibleFields.map(label => editFieldHtml(meeting, label)).join("")}</fieldset>`;
+    }).join("");
+  }
+  document.getElementById("meetingEditFields").innerHTML = content;
+  setText("meetingEditStatus", WRITE_ENDPOINT ? "Changes appear immediately and sync to the shared draft in the background." : "Shared draft saving is not configured.");
+  document.getElementById("saveMeetingEdit").disabled = true;
+  document.getElementById("meetingEditDialog").showModal();
+  updateMeetingEditorState();
+}
+
+function updateMeetingEditorState() {
+  const inputs = [...document.querySelectorAll("#meetingEditFields [data-edit-field]:not(:disabled)")];
+  const changed = inputs.some(input => (isAssignmentField(input.dataset.editField) ? assignmentInputValue(input) : input.value.trim()) !== input.dataset.initialValue);
+  document.getElementById("saveMeetingEdit").disabled = !WRITE_ENDPOINT || !changed;
+}
+
+async function saveMeetingEditor(event) {
+  event.preventDefault();
+  if (!document.getElementById("meetingEditDialog").open || !state.editMeeting || !canEditActiveMeeting()) return;
+  const status = document.getElementById("meetingEditStatus");
+  if (!WRITE_ENDPOINT) {
+    status.className = "meeting-edit-status error";
+    status.textContent = "The shared draft service is not connected.";
+    return;
+  }
+  const updates = Object.fromEntries([...document.querySelectorAll("#meetingEditFields [data-edit-field]")]
+    .map(input => [input.dataset.editField, isAssignmentField(input.dataset.editField) ? assignmentInputValue(input) : input.value.trim(), input.dataset.initialValue])
+    .filter(([, value, initial]) => value !== initial)
+    .map(([label, value]) => [label, value]));
+  const meetingDate = sheetDateValue(state.editMeeting.date);
+  if (!Object.keys(updates).length) return;
+  const apiSection = activeEditApiSection();
+  const baseValues = Object.fromEntries(Object.keys(updates).map(label => [label, state.sheetBaseValues[meetingDate]?.[label] || ""]));
+  const fieldVersions = Object.fromEntries(Object.keys(updates).map(label => [label, Number(state.editFieldVersions?.[`${meetingDate}|${apiSection}|${label}`] || 0)]));
+  try {
+    enqueueDraftSave({
+      action: "saveDraft",
+      meetingDate,
+      section: apiSection,
+      updates,
+      baseValues,
+      fieldVersions,
+    });
+    dashboardLoadVersion += 1;
+    if (state.editOriginSpeechItem) {
+      const editedField = Object.keys(updates)[0];
+      const value = updates[editedField] || "Pending";
+      state.editOriginSpeechItem.querySelector("strong").textContent = value;
+      state.editOriginSpeechItem.classList.toggle("pending", value === "Pending");
+    }
+    closeMeetingEditor();
+    renderSheetPayload(state.sheetPayload);
+    void flushLocalSaves();
+  } catch (error) {
+    status.className = "meeting-edit-status error";
+    status.textContent = `Unable to save on this device: ${error.message}`;
+  }
+}
+
+function openAdminApplyDialog() {
+  if (localSaves.length) return;
+  const entries = sharedDraftEntries();
+  if (!entries.length) return;
+  state.adminApplyEntries = entries;
+  const meetings = new Set(entries.map(entry => entry.meetingDate)).size;
+  setText("adminApplySummary", `${entries.length} shared change${entries.length === 1 ? "" : "s"} across ${meetings} meeting${meetings === 1 ? "" : "s"} will be written to Google Sheets.`);
+  const uniqueLabels = [...new Set(entries.map(entry => entry.label))];
+  const compactLabels = uniqueLabels.slice(0, 2).join(", ");
+  const remaining = Math.max(0, uniqueLabels.length - 2);
+  setText("adminApplyCompact", `${compactLabels}${remaining ? ` +${remaining}` : ""}`);
+  document.getElementById("adminApplyList").innerHTML = entries.map((entry, index) => `
+    <label class="admin-apply-item">
+      <input type="checkbox" data-apply-change="${index}" checked>
+      <span class="admin-apply-toggle" aria-hidden="true"></span>
+      <time>${escapeHtml(entry.meetingDate)}</time>
+      <strong>${escapeHtml(entry.section)} · ${escapeHtml(entry.label)}</strong>
+      <span class="admin-apply-value">${escapeHtml(entry.value || "(clear value)")}</span>
+    </label>`).join("");
+  document.getElementById("adminApplyDetails").open = true;
+  const status = document.getElementById("adminApplyStatus");
+  status.className = "meeting-edit-status";
+  status.textContent = "Selected changes will be applied. Unselected changes will be discarded and restored from Google Sheets.";
+  document.getElementById("adminApplyPin").value = "";
+  const applyButton = document.getElementById("confirmApplySheets");
+  applyButton.dataset.force = "";
+  updateAdminApplySelection();
+  document.getElementById("adminApplyDialog").showModal();
+}
+
+function selectedAdminApplyEntries() {
+  return [...document.querySelectorAll("#adminApplyList [data-apply-change]:checked")]
+    .map(input => state.adminApplyEntries?.[Number(input.dataset.applyChange)])
+    .filter(Boolean);
+}
+
+function updateAdminApplySelection() {
+  const total = state.adminApplyEntries?.length || 0;
+  const selected = selectedAdminApplyEntries().length;
+  const discarded = total - selected;
+  setText("adminApplyCompact", `${selected} of ${total} selected`);
+  setText("adminApplySummary", selected
+    ? `${selected} selected change${selected === 1 ? "" : "s"} will be written to Google Sheets.${discarded ? ` ${discarded} unselected change${discarded === 1 ? "" : "s"} will be discarded and restored from the sheet.` : ""}`
+    : `All ${total} pending change${total === 1 ? "" : "s"} will be discarded and restored from Google Sheets.`);
+  const button = document.getElementById("confirmApplySheets");
+  button.dataset.force = "";
+  button.textContent = selected ? `Apply ${selected} selected` : "Discard all changes";
+}
+
+async function applySharedDrafts(event) {
+  event.preventDefault();
+  if (localSaves.length) return;
+  const pin = document.getElementById("adminApplyPin").value;
+  const status = document.getElementById("adminApplyStatus");
+  const button = document.getElementById("confirmApplySheets");
+  const selectedEntries = selectedAdminApplyEntries();
+  if (!/^\d{4}$/.test(pin)) {
+    status.className = "meeting-edit-status error";
+    status.textContent = "Enter a 4-digit administrator PIN.";
+    return;
+  }
+  button.disabled = true;
+  status.className = "meeting-edit-status";
+  status.textContent = selectedEntries.length
+    ? `Applying ${selectedEntries.length} selected change${selectedEntries.length === 1 ? "" : "s"} to Google Sheets…`
+    : "Discarding all shared changes and reloading Google Sheets…";
+  try {
+    const selections = selectedEntries.map(({ meetingDate, section, label }) => ({ meetingDate, section, label }));
+    const result = await apiRequest({
+      action: "applyDrafts",
+      pin,
+      force: button.dataset.force === "true",
+      selectionMode: "explicit",
+      selections,
+      totalDrafts: state.adminApplyEntries?.length || 0,
+      draftRevision: state.sharedDrafts.revision,
+    });
+    status.className = "meeting-edit-status success";
+    status.textContent = `Applied ${result.updated} and discarded ${result.discarded || 0}. Reloading Google Sheets…`;
+    await loadDashboard(true);
+    setTimeout(() => document.getElementById("adminApplyDialog").close(), 700);
+  } catch (error) {
+    if (error.result?.code === "DRAFT_CHANGED") {
+      status.className = "meeting-edit-status warning";
+      status.textContent = "The pending changes changed before approval. Reloading the latest list from Google Sheets…";
+      await loadDashboard(true);
+      setTimeout(() => document.getElementById("adminApplyDialog").close(), 700);
+      return;
+    }
+    if (error.result?.code === "SHEET_CHANGED") {
+      const conflicts = error.result.conflicts || [];
+      status.className = "meeting-edit-status warning";
+      status.textContent = `Warning: Google Sheets changed after the draft was created (${conflicts.map(item => `${item.meetingDate} · ${item.label}`).join(", ")}). Review the sheet first, then click Apply anyway to overwrite it.`;
+      button.dataset.force = "true";
+      button.textContent = "Apply anyway";
+      return;
+    }
+    status.className = "meeting-edit-status error";
+    status.textContent = `Unable to apply: ${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function changeAdministratorPin(event) {
+  event.preventDefault();
+  const currentPin = document.getElementById("currentAdminPin").value;
+  const newPin = document.getElementById("newAdminPin").value;
+  const confirmPin = document.getElementById("confirmAdminPin").value;
+  const status = document.getElementById("changePinStatus");
+  if (!/^\d{4}$/.test(currentPin) || !/^\d{4}$/.test(newPin)) {
+    status.className = "meeting-edit-status error";
+    status.textContent = "Both PINs must contain exactly 4 digits.";
+    return;
+  }
+  if (newPin !== confirmPin) {
+    status.className = "meeting-edit-status error";
+    status.textContent = "The new PIN confirmation does not match.";
+    return;
+  }
+  status.className = "meeting-edit-status";
+  status.textContent = "Changing the administrator PIN…";
+  try {
+    await apiRequest({ action: "changePin", currentPin, newPin });
+    status.className = "meeting-edit-status success";
+    status.textContent = "Administrator PIN changed. You can also use the master PIN to reset it if it is lost.";
+    event.currentTarget.reset();
+  } catch (error) {
+    status.className = "meeting-edit-status error";
+    status.textContent = `Unable to change PIN: ${error.message}`;
+  }
+}
+
+function renderMeetingReadiness(model, meeting) {
+  const requirements = [];
+  ["Theme", "Theme Question", "Word of the day", "Quote of the day"].forEach(label => {
+    requirements.push({ label, complete: Boolean(clean(model.rowsByLabel.get(label)?.row[meeting.col])) });
+  });
+  ROLE_LABELS.filter(role => role !== "Speaker" && role !== "Evaluator").forEach(label => {
+    requirements.push({ label, complete: confirmedAssignment(model.rowsByLabel.get(label)?.row[meeting.col]) });
+  });
+  for (let number = 1; number <= 3; number += 1) {
+    const speaker = normalizeName(model.rowsByLabel.get(`Speaker ${number}`)?.row[meeting.col]);
+    if (number > 1 && !speaker) continue;
+    requirements.push(
+      { label: `Speaker ${number}`, complete: confirmedAssignment(model.rowsByLabel.get(`Speaker ${number}`)?.row[meeting.col]) },
+      { label: `Title ${number}`, complete: Boolean(clean(model.rowsByLabel.get(`Title ${number}`)?.row[meeting.col])) },
+      { label: `Evaluator ${number}`, complete: confirmedAssignment(model.rowsByLabel.get(`Evaluator ${number}`)?.row[meeting.col]) },
+    );
+  }
+  const completed = requirements.filter(item => item.complete).length;
+  const total = requirements.length;
+  const percentage = Math.round(completed / total * 100);
+  const missing = requirements.filter(item => !item.complete).map(item => item.label);
+  const tone = percentage === 100 ? "ready" : percentage >= 70 ? "almost-ready" : "needs-attention";
+  const status = percentage === 100 ? "Ready" : percentage >= 70 ? "Almost ready" : "Needs attention";
+  const container = document.getElementById("meetingReadiness");
+  container.className = `meeting-readiness ${tone}`;
+  setText("readinessStatus", status);
+  setText("readinessScore", `${percentage}% (${completed}/${total})`);
+  const missingElement = document.getElementById("readinessMissing");
+  if (missing.length) {
+    const visibleMissing = missing.slice(0, 3);
+    const remaining = missing.length - visibleMissing.length;
+    missingElement.textContent = `Missing ${missing.length}: ${visibleMissing.join(", ")}${remaining ? ` +${remaining} more` : ""}`;
+    missingElement.title = `Missing: ${missing.join(", ")}`;
+    container.setAttribute("aria-disabled", "false");
+    container.tabIndex = 0;
+    document.getElementById("missingDialogSummary").textContent = `${missing.length} of ${total} required fields still need information.`;
+    document.getElementById("missingDialogList").innerHTML = missing.map(item => `<li>${escapeHtml(item)}</li>`).join("");
+  } else {
+    missingElement.textContent = "All required fields are complete.";
+    missingElement.removeAttribute("title");
+    container.setAttribute("aria-disabled", "true");
+    container.tabIndex = -1;
+    document.getElementById("missingDialogSummary").textContent = "All required fields are complete.";
+    document.getElementById("missingDialogList").innerHTML = "";
+  }
+  const track = container.querySelector(".readiness-track");
+  track.setAttribute("aria-valuenow", String(percentage));
+  document.getElementById("readinessBar").style.width = `${percentage}%`;
+}
+
+function countBy(items, keyFn) {
+  return items.reduce((map, item) => map.set(keyFn(item), (map.get(keyFn(item)) || 0) + 1), new Map());
+}
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
+}
+function setText(id, value) { document.getElementById(id).textContent = value; }
+function tooltipText(items) {
+  return items.slice(0, 9).map(item => `${formatDate(item.date)} · ${item.member || item.speaker}${item.meetingNo ? ` · ${item.meetingNo}` : ""}`).join("\n") + (items.length > 9 ? `\n외 ${items.length - 9}건` : "");
+}
+function addTooltip(element, content, variant = "") {
+  element.dataset.tooltip = content;
+  element.dataset.tooltipVariant = variant;
+  if (window.matchMedia("(hover: hover) and (pointer: fine)").matches) {
+    element.addEventListener("mouseenter", showTooltip);
+    element.addEventListener("mousemove", moveTooltip);
+    element.addEventListener("mouseleave", hideTooltip);
+    element.addEventListener("focus", showTooltip);
+    element.addEventListener("blur", hideTooltip);
+  }
+  element.tabIndex = 0;
+}
+function showTooltip(event) {
+  const tooltip = document.getElementById("tooltip");
+  tooltip.textContent = event.currentTarget.dataset.tooltip;
+  tooltip.classList.toggle("detail", event.currentTarget.dataset.tooltipVariant === "detail");
+  tooltip.classList.add("visible"); tooltip.setAttribute("aria-hidden", "false"); moveTooltip(event);
+}
+function moveTooltip(event) {
+  const tooltip = document.getElementById("tooltip");
+  const x = Math.min((event.clientX || 20) + 14, window.innerWidth - tooltip.offsetWidth - 12);
+  const y = Math.min((event.clientY || 20) + 14, window.innerHeight - tooltip.offsetHeight - 12);
+  tooltip.style.left = `${Math.max(8, x)}px`; tooltip.style.top = `${Math.max(8, y)}px`;
+}
+function hideTooltip() {
+  const tooltip = document.getElementById("tooltip");
+  tooltip.classList.remove("visible");
+  tooltip.setAttribute("aria-hidden", "true");
+  tooltip.style.left = "";
+  tooltip.style.top = "";
+}
+
+function renderFilters(model) {
+  const memberSelect = document.getElementById("memberFilter");
+  const roleSelect = document.getElementById("roleFilter");
+  const members = [...model.members].sort((a,b) => a.name.localeCompare(b.name));
+  memberSelect.innerHTML = `<option value="all">All members</option>${members.map(m => `<option value="${escapeHtml(m.name)}">${escapeHtml(m.name)}</option>`).join("")}`;
+  roleSelect.innerHTML = `<option value="all">All roles</option>${ROLE_LABELS.map(role => `<option value="${role}">${role}</option>`).join("")}`;
+  memberSelect.value = state.member; roleSelect.value = state.role;
+}
+
+function filteredAssignments(model) {
+  return model.assignments.filter(item => (state.member === "all" || item.member === state.member) && (state.role === "all" || item.role === state.role));
+}
+function renderRoles(model) {
+  const assignments = filteredAssignments(model);
+  const roleCounts = countBy(assignments, item => item.role);
+  const chart = document.getElementById("roleChart");
+  const roles = ROLE_LABELS.map(role => ({ role, count: roleCounts.get(role) || 0, items: assignments.filter(item => item.role === role) })).filter(x => x.count || state.role === x.role);
+  const max = Math.max(1, ...roles.map(x => x.count));
+  chart.innerHTML = roles.length ? roles.map(item => `
+    <div class="bar-row">
+      <span class="bar-label">${escapeHtml(item.role)}</span>
+      <div class="bar-track" data-role="${escapeHtml(item.role)}"><div class="bar-fill" style="--width:${(item.count / max * 100).toFixed(1)}%"></div></div>
+      <span class="bar-value">${item.count}</span>
+    </div>`).join("") : `<div class="empty-state">선택 조건에 맞는 역할 내역이 없습니다.</div>`;
+  chart.querySelectorAll(".bar-track").forEach(el => {
+    const items = roles.find(x => x.role === el.dataset.role)?.items || [];
+    addTooltip(el, `${el.dataset.role} · ${items.length}회\n${tooltipText(items)}`);
+  });
+  setText("roleScopeLabel", state.member === "all" ? "All members" : state.member);
+
+  const memberTable = document.getElementById("memberTable");
+  const ranked = [...model.members].map(member => {
+    const counts = countBy(member.roles, item => item.role);
+    const top = [...counts.entries()].sort((a,b) => b[1] - a[1])[0];
+    return { ...member, total: member.roles.length, top: top ? `${top[0]} · ${top[1]}` : "—" };
+  }).sort((a,b) => (b.total + b.speeches.length) - (a.total + a.speeches.length));
+  memberTable.innerHTML = ranked.map(member => `<tr data-member="${escapeHtml(member.name)}" class="${state.member === member.name ? "active" : ""}"><td><strong>${escapeHtml(member.name)}</strong></td><td>${member.total}</td><td>${member.speeches.length}</td><td>${escapeHtml(member.top)}</td></tr>`).join("");
+  memberTable.querySelectorAll("tr").forEach(row => row.addEventListener("click", () => {
+    state.member = row.dataset.member; document.getElementById("memberFilter").value = state.member; renderRoles(model); renderHistory(model);
+  }));
+  renderHistory(model);
+}
+
+function renderHistory(model) {
+  const items = filteredAssignments(model).sort((a,b) => b.date - a.date);
+  setText("historyCount", `${items.length} assignments`);
+  const container = document.getElementById("activityHistory");
+  container.innerHTML = items.length ? items.map(item => `<article class="activity-card"><time>${formatDate(item.date)} · ${escapeHtml(item.meetingNo)}</time><strong>${escapeHtml(item.role)}</strong><span>${escapeHtml(item.member)}</span></article>`).join("") : `<div class="empty-state">표시할 활동이 없습니다.</div>`;
+  container.querySelectorAll(".activity-card").forEach((card, index) => addTooltip(card, `${items[index].member}\n${items[index].role}\n${formatDate(items[index].date)} · Meeting ${items[index].meetingNo}`));
+}
+
+let searchGroupStore = new Map();
+
+function isMobileSearchViewport() {
+  return window.matchMedia?.("(max-width: 620px)").matches ?? window.innerWidth <= 620;
+}
+
+function searchSourceType(item) {
+  if (item.kind === "role") return "ROLE";
+  if (item.kind === "speech") {
+    return ({
+      "Speech presenter": "SPEECH PRESENTER",
+      Project: "PROJECT",
+      "Speech title": "SPEECH TITLE",
+      "Speech time": "SPEECH TIME",
+      Evaluator: "EVALUATOR",
+    })[item.label] || "SPEECH";
+  }
+  return ({
+    Theme: "THEME",
+    "Theme Question": "THEME QUESTION",
+    "Word of the day": "WORD OF THE DAY",
+    "Quote of the day": "QUOTE OF THE DAY",
+  })[item.label] || "MEETING";
+}
+
+function renderMemberSearch(model, query = document.getElementById("memberSearchInput")?.value || "", options = {}) {
+  const search = clean(query);
+  const container = document.getElementById("memberSearchResults");
+  if (!search) {
+    searchGroupStore = new Map();
+    container.innerHTML = "";
+    return;
+  }
+  const needle = search.toLocaleLowerCase("ko-KR");
+  const matches = (model.searchAssignments || []).filter(item => [item.member, item.role, item.sourceLabel, item.label, item.value].some(value => clean(value).toLocaleLowerCase("ko-KR").includes(needle)));
+  const grouped = new Map();
+  matches.forEach(item => grouped.set(item.groupKey || `member:${item.member}`, [...(grouped.get(item.groupKey || `member:${item.member}`) || []), item]));
+  const results = [...grouped.entries()].sort((a, b) => a[0].localeCompare(b[0], "en"));
+  searchGroupStore = new Map(results.map(([groupKey, items], index) => [String(index), { title: items[0].groupLabel || groupKey, items }]));
+  const showInDialog = Boolean(options.openDialog) && isMobileSearchViewport();
+  const resultLimit = showInDialog ? Number.POSITIVE_INFINITY : 6;
+  const resultMarkup = results.length ? results.map(([groupKey, items], index) => {
+    const recent = [...items].sort((a, b) => b.date - a.date).slice(0, resultLimit);
+    const title = items[0].groupLabel || groupKey;
+    const titleType = items[0].kind === "meeting" ? "MEETING" : "NAME";
+    const detail = item => item.kind === "role" ? `${item.role} · ${item.meetingNo || "Meeting"}` : item.value;
+    return `<article class="search-result-card"><div class="search-result-heading"><div class="search-result-title"><span class="search-source-badge ${titleType === "NAME" ? "search-source-name" : ""}">${titleType}</span><strong>${escapeHtml(title)}</strong></div></div><ul>${recent.map(item => `<li><time>${formatDate(item.date, { year: "numeric", month: "numeric", day: "numeric" })}</time><div class="search-result-detail"><span class="search-source-badge">${escapeHtml(searchSourceType(item))}</span><span class="search-result-value">${escapeHtml(detail(item))}</span></div></li>`).join("")}</ul>${items.length > recent.length ? `<button type="button" class="search-more-button" data-search-more="${index}">외 ${items.length - recent.length}건</button>` : ""}</article>`;
+  }).join("") : `<div class="search-empty">이름 또는 Role 철자를 확인해 주세요.</div>`;
+  if (showInDialog) {
+    setText("searchResultsTitle", `Search results for “${search}”`);
+    document.getElementById("searchResultsDialogBody").innerHTML = resultMarkup;
+    container.innerHTML = "";
+    const dialog = document.getElementById("searchResultsDialog");
+    if (!dialog.open) dialog.showModal();
+  } else {
+    container.innerHTML = resultMarkup;
+  }
+}
+
+function openSearchResultsDialog(groupId) {
+  const group = searchGroupStore.get(String(groupId));
+  if (!group) return;
+  setText("searchResultsTitle", group.title);
+  const detail = item => item.kind === "role" ? item.member : item.value;
+  const label = item => item.kind === "role" ? item.role : item.label;
+  document.getElementById("searchResultsDialogBody").innerHTML = [...group.items].sort((a, b) => b.date - a.date).map(item => `<article class="search-full-item"><time>${formatDate(item.date, { year: "numeric", month: "numeric", day: "numeric" })} · ${escapeHtml(item.meetingNo || "Meeting")}</time><div><span class="search-source-badge">${escapeHtml(searchSourceType(item))}</span><strong>${escapeHtml(label(item))}</strong><span>${escapeHtml(detail(item))}</span></div></article>`).join("");
+  document.getElementById("searchResultsDialog").showModal();
+}
+
+function renderSpeeches(model) {
+  const ranking = [...model.members].filter(m => m.speeches.length).sort((a,b) => b.speeches.length - a.speeches.length || a.name.localeCompare(b.name));
+  document.getElementById("speechRanking").innerHTML = ranking.slice(0, 12).map((member, index) => `<div class="speaker-rank" data-name="${escapeHtml(member.name)}"><span class="rank">${String(index + 1).padStart(2,"0")}</span><strong>${escapeHtml(member.name)}</strong><b>${member.speeches.length}</b></div>`).join("");
+  document.querySelectorAll(".speaker-rank").forEach((el, index) => addTooltip(el, `${ranking[index].name} · ${ranking[index].speeches.length} speeches\n${ranking[index].speeches.map(s => `${formatDate(s.date)} · ${s.title}`).join("\n")}`));
+  const speeches = [...model.speeches].sort((a,b) => b.date - a.date);
+  document.getElementById("speechTimeline").innerHTML = speeches.map(speech => `<article class="speech-card"><time>${formatDate(speech.date)} · ${escapeHtml(speech.meetingNo)}</time><h4>${escapeHtml(speech.title)}</h4><p>${escapeHtml(speech.speaker)}</p></article>`).join("");
+  document.querySelectorAll(".speech-card").forEach((card, index) => {
+    const speech = speeches[index];
+    addTooltip(card, `${speech.speaker} · ${speech.title}\nProject: ${speech.project || "—"}\nTime: ${speech.time || "—"}\nEvaluator: ${speech.evaluator || "—"}`);
+  });
+}
+
+function renderThisWeek(model) {
+  updateMeetingArrowControls();
+  const meeting = activeMeeting();
+  const bookingIcon = document.getElementById("libraryBookingStatus");
+  bookingIcon.hidden = !meeting || meeting.noMeeting;
+  const bookingDate = bookingIcon.hidden ? "" : sheetDateValue(meeting.date);
+  const updateBookingIcon = (status = "unknown") => {
+    const label = { success: "도서관 예약 승인 확인", failed: "도서관 승인 내역 없음", unknown: "도서관 예약 확인 필요" }[status];
+    bookingIcon.dataset.status = status;
+    bookingIcon.title = label;
+    bookingIcon.setAttribute("aria-label", label);
+  };
+  if (bookingIcon.dataset.date !== bookingDate) updateBookingIcon();
+  bookingIcon.dataset.date = bookingDate;
+  if (bookingDate) {
+    libraryRequest({ action: "status", date: bookingDate }).then(({ status }) => {
+      if (bookingIcon.dataset.date === bookingDate) updateBookingIcon(status);
+    }).catch(() => {});
+  }
+  document.getElementById('roleSuggestionsButton').disabled = !canEditActiveMeeting() || !meeting || meeting.noMeeting || !WRITE_ENDPOINT;
+  renderAttendees();
+  document.querySelectorAll("[data-edit-section]").forEach(button => {
+    button.disabled = !canEditActiveMeeting();
+    button.title = state.model && meeting && meeting.date < meetingReferenceDateKst() && !canEditActiveMeeting() ? "Only the immediately previous meeting can be edited." : "";
+  });
+  const specialTab = document.querySelector("[data-special-event-tab]");
+  if (specialTab) {
+    specialTab.disabled = !canEditActiveMeeting();
+    specialTab.title = specialTab.disabled ? "Only the immediately previous meeting and future meetings can be edited." : "Edit Special Event for this meeting.";
+  }
+  setText("meetingEyebrow", "SOTM MEETING SCHEDULE");
+  if (!meeting) {
+    setText("meetingTitle", "No Scheduled Meeting");
+    const readiness = document.getElementById("meetingReadiness");
+    readiness.className = "meeting-readiness needs-attention";
+    readiness.setAttribute("aria-disabled", "true");
+    readiness.tabIndex = -1;
+    setText("readinessStatus", "Needs attention");
+    setText("readinessScore", "0% (0/23)");
+    setText("readinessMissing", "No meeting is scheduled.");
+    document.querySelector(".readiness-track").setAttribute("aria-valuenow", "0");
+    document.getElementById("readinessBar").style.width = "0%";
+    setText("meetingNumber", "—");
+    document.getElementById("specialEvent").classList.add("hidden");
+    document.getElementById("meetingContext").innerHTML = `<div class="empty-state">No meeting details are available.</div>`;
+    document.getElementById("weekAssignments").innerHTML = `<div class="empty-state">No role assignments are available.</div>`;
+    document.getElementById("agendaTimeline").innerHTML = `<div class="empty-state">No agenda is available.</div>`;
+    document.getElementById("weekSpeeches").innerHTML = `<div class="empty-state">No prepared speeches are available.</div>`;
+    document.getElementById("meetingAwards").innerHTML = `<div class="empty-state">No meeting awards are available.</div>`;
+    return;
+  }
+  setText("meetingTitle", `${formatMeetingDate(meeting.date)} Meeting`);
+  setText("meetingNumber", meeting.meetingNo || "—");
+  const special = document.getElementById("specialEvent");
+  special.textContent = meeting.special ? `Special event · ${meeting.special}` : "";
+  special.classList.toggle("hidden", !meeting.special);
+
+  if (meeting.noMeeting) {
+    const readiness = document.getElementById("meetingReadiness");
+    readiness.className = "meeting-readiness no-meeting";
+    readiness.setAttribute("aria-disabled", "true");
+    readiness.tabIndex = -1;
+    setText("readinessStatus", "No meeting");
+    setText("readinessScore", "—");
+    const missingElement = document.getElementById("readinessMissing");
+    missingElement.textContent = "No meeting is scheduled for this date.";
+    missingElement.removeAttribute("title");
+    document.getElementById("missingDialogSummary").textContent = "No meeting is scheduled for this date.";
+    document.getElementById("missingDialogList").innerHTML = "";
+    document.querySelector(".readiness-track").setAttribute("aria-valuenow", "0");
+    document.getElementById("readinessBar").style.width = "0%";
+    document.getElementById("meetingContext").innerHTML = `<div class="empty-state">No meeting details are available.</div>`;
+    document.getElementById("weekAssignments").innerHTML = `<div class="empty-state">No role assignments are available.</div>`;
+    document.getElementById("agendaTimeline").innerHTML = `<div class="empty-state">No agenda is available.</div>`;
+    document.getElementById("weekSpeeches").innerHTML = `<div class="empty-state">No prepared speeches are available.</div>`;
+    document.getElementById("meetingAwards").innerHTML = `<div class="empty-state">No meeting awards are available.</div>`;
+    return;
+  }
+
+  renderMeetingReadiness(model, meeting);
+
+  const contextFields = [
+    ["Theme", clean(model.rowsByLabel.get("Theme")?.row[meeting.col])],
+    ["Theme Question", clean(model.rowsByLabel.get("Theme Question")?.row[meeting.col])],
+    ["Word of the day", clean(model.rowsByLabel.get("Word of the day")?.row[meeting.col])],
+    ["Quote of the day", clean(model.rowsByLabel.get("Quote of the day")?.row[meeting.col])],
+  ];
+  const meetingContext = document.getElementById("meetingContext");
+  meetingContext.innerHTML = contextFields.map(([label, value], index) => `
+    <button type="button" class="meeting-context-item ${value ? "" : "pending"}" data-theme-index="${index}" aria-haspopup="dialog">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value || "Pending")}</strong>
+    </button>`).join("");
+  meetingContext.querySelectorAll("[data-theme-index]").forEach(button => {
+    const [label, value] = contextFields[Number(button.dataset.themeIndex)];
+    button.addEventListener("click", () => showThemeDetails(label, value));
+    addMobileLongPress(button, () => openMeetingEditor("theme", label));
+  });
+
+  const assignments = [];
+  model.rowsByLabel.forEach(({ row }, label) => {
+    if (!isRoleRow(label)) return;
+    const role = canonicalRole(label);
+    if (role === "Speaker" || role === "Evaluator") return;
+    const member = normalizeName(row[meeting.col]);
+    assignments.push({ role, sourceLabel: label, rawValue: row[meeting.col], member: member || "Pending", pending: !member });
+  });
+  const assignmentContainer = document.getElementById("weekAssignments");
+  assignmentContainer.innerHTML = assignments.length ? assignments.map((item, index) => `<div class="assignment-wrap"><button type="button" class="assignment ${item.pending ? "pending" : ""} ${isTentative(item.rawValue) ? "tentative" : ""}" data-assignment-index="${index}" aria-haspopup="dialog"><span>${escapeHtml(item.role)}</span><strong>${escapeHtml(item.member)}${guestRoleIcon(item.rawValue)}</strong></button>${tentativeIcon(item.sourceLabel, item.rawValue)}</div>`).join("") : `<div class="empty-state">No role assignments are available yet.</div>`;
+  assignmentContainer.querySelectorAll("[data-assignment-index]").forEach(button => {
+    const assignment = assignments[Number(button.dataset.assignmentIndex)];
+    button.addEventListener("click", () => showRoleDetails(assignment));
+    addMobileLongPress(button, () => openMeetingEditor("roles", assignment.role));
+  });
+  renderCompactAgenda(model, meeting);
+
+  const weekSpeeches = [];
+  for (let number = 1; number <= 4; number += 1) {
+    const speaker = normalizeName(model.rowsByLabel.get(`Speaker ${number}`)?.row[meeting.col]);
+    if (number > 1 && !speaker) continue;
+    const title = clean(model.rowsByLabel.get(`Title ${number}`)?.row[meeting.col]);
+    const evaluator = normalizeName(model.rowsByLabel.get(`Evaluator ${number}`)?.row[meeting.col]);
+    weekSpeeches.push({
+      slot: number,
+      speakerRaw: model.rowsByLabel.get(`Speaker ${number}`)?.row[meeting.col],
+      evaluatorRaw: model.rowsByLabel.get(`Evaluator ${number}`)?.row[meeting.col],
+      speaker: speaker || `Speaker ${number} · Pending`,
+      title: title || "Title Pending",
+      project: clean(model.rowsByLabel.get(`Project ${number}`)?.row[meeting.col]),
+      time: clean(model.rowsByLabel.get(`Time ${number}`)?.row[meeting.col]),
+      evaluator: evaluator || "Pending",
+      pending: !speaker || !title || !evaluator,
+    });
+  }
+  const weekContainer = document.getElementById("weekSpeeches");
+  weekContainer.innerHTML = weekSpeeches.map(s => `<article class="week-speech ${s.pending ? "pending" : ""}" role="button" tabindex="0" aria-haspopup="dialog" aria-label="Open speech details for ${escapeHtml(s.speaker)}"><span class="speaker">${tentativeIcon(`Speaker ${s.slot}`, s.speakerRaw)}${escapeHtml(s.speaker)}${guestRoleIcon(s.speakerRaw)}</span><h4>${escapeHtml(s.title)}</h4><p>Evaluator · ${tentativeIcon(`Evaluator ${s.slot}`, s.evaluatorRaw)}${escapeHtml(s.evaluator)}${guestRoleIcon(s.evaluatorRaw)}</p></article>`).join("");
+  weekContainer.querySelectorAll(".week-speech").forEach((card, index) => {
+    const speech = weekSpeeches[index];
+    addTooltip(card, `${speech.speaker} · ${speech.title}\nProject: ${speech.project || "—"}\nTime: ${speech.time || "—"}\nEvaluator: ${speech.evaluator || "—"}`);
+    const openDetails = () => showSpeechDetails(speech);
+    card.addEventListener("click", event => { if (!event.target.closest("[data-assignment-status]")) openDetails(); });
+    addMobileLongPress(card, () => openMeetingEditor("speeches", "", speech.slot));
+    card.addEventListener("keydown", event => {
+      if (event.target !== card) return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openDetails();
+      }
+    });
+  });
+
+  const awards = AWARD_EDIT_FIELDS.map(label => {
+    const winner = normalizeName(model.rowsByLabel.get(label)?.row[meeting.col]);
+    return { label, displayLabel: AWARD_DISPLAY_LABELS[label] || label, winner, pending: !winner };
+  });
+  const awardsContainer = document.getElementById("meetingAwards");
+  awardsContainer.innerHTML = awards.map((award, index) => `
+    <button type="button" class="meeting-award ${award.pending ? "pending" : ""}" data-award-index="${index}" aria-haspopup="dialog">
+      <span>${escapeHtml(award.displayLabel)}</span>
+      <strong>${escapeHtml(award.winner || "Not selected")}</strong>
+    </button>`).join("");
+  awardsContainer.querySelectorAll("[data-award-index]").forEach(button => {
+    const award = awards[Number(button.dataset.awardIndex)];
+    button.addEventListener("click", () => showAwardDetails(award.label, award.winner));
+    addMobileLongPress(button, () => openMeetingEditor("awards", award.label));
+  });
+}
+
+function showSpeechDetails(speech) {
+  hideTooltip();
+  setText("speechDialogTitle", speech.title || "Title Pending");
+  const details = [
+    ["Speaker", `${isTentative(speech.speakerRaw) ? "◷ " : ""}${speech.speaker}`],
+    ["Project", speech.project || "Pending"],
+    ["Title", speech.title || "Pending"],
+    ["Time", speech.time || "Pending"],
+    ["Evaluator", `${isTentative(speech.evaluatorRaw) ? "◷ " : ""}${speech.evaluator || "Pending"}`],
+  ];
+  const editable = canEditActiveMeeting();
+  document.getElementById("speechDialogDetails").innerHTML = details.map(([label, value]) => {
+    const tag = editable ? "button" : "div";
+    const field = `${label} ${speech.slot}`;
+    return `<${tag} ${editable ? `type="button" data-speech-field="${escapeHtml(field)}"` : ""} class="speech-detail-item ${value === "Pending" || String(value).includes("Pending") ? "pending" : ""}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}${label === "Speaker" ? guestRoleIcon(speech.speakerRaw) : label === "Evaluator" ? guestRoleIcon(speech.evaluatorRaw) : ""}</strong></${tag}>`;
+  }).join("");
+  document.querySelectorAll("#speechDialogDetails [data-speech-field]").forEach(item => {
+    item.addEventListener("click", event => {
+      event.stopPropagation();
+      openMeetingEditor("speeches", item.dataset.speechField, speech.slot, item);
+    });
+  });
+  const editButton = document.getElementById("speechDialogEditButton");
+  const actions = document.getElementById("speechDialogActions");
+  editButton.dataset.speechSlot = speech.slot;
+  actions.classList.toggle("hidden", !editable);
+  editButton.disabled = !editable;
+  document.getElementById("speechDetailsDialog").showModal();
+}
+
+function render(model, meta) {
+  setText("asOfDate", formatDate(model.today, { year: "numeric" }));
+  setText("meetingCount", model.completedColumns.length);
+  setText("roleCount", model.assignments.length);
+  setText("speechCount", model.speeches.length);
+  setText("memberCount", model.members.length);
+  document.getElementById("sheetLink").href = meta.source;
+  setText("lastSync", `Last synced ${new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Seoul", dateStyle: "medium", timeStyle: "short" }).format(new Date(meta.fetchedAt))} · Google Sheets`);
+  renderFilters(model); renderRoles(model); renderMemberSearch(model); renderSpeeches(model); renderThisWeek(model);
+}
+
+function renderSheetPayload(payload) {
+  const rolesRows = parseCsv(payload.rolesCsv);
+  applySharedDraftsToRows(rolesRows, state.sharedDrafts);
+  applyLocalSavesToRows(rolesRows);
+  confirmDueAssignmentRows(rolesRows);
+  state.model = buildModel(rolesRows, parseCsv(payload.agendaCsv));
+  render(state.model, payload);
+  renderDraftSyncState();
+}
+
+function applyConfirmedDraft(result, meetingDate, section, updates) {
+  if (result.drafts) {
+    state.sharedDrafts = result.drafts;
+  } else {
+    // Older deployments return only field versions. Keep the old revision so
+    // polling still retrieves concurrent edits from other people.
+    const drafts = state.sharedDrafts;
+    drafts.meetings[meetingDate] ||= {};
+    drafts.meetings[meetingDate][section] ||= {};
+    Object.entries(updates).forEach(([label, value]) => {
+      if (value === (state.sheetBaseValues[meetingDate]?.[label] || "")) {
+        delete drafts.meetings[meetingDate][section][label];
+      } else {
+        drafts.meetings[meetingDate][section][label] = value;
+      }
+    });
+    drafts.fieldVersions = { ...drafts.fieldVersions, ...result.fieldVersions };
+  }
+  renderSheetPayload(state.sheetPayload);
+}
+
+async function loadDashboard(force = false) {
+  const loadVersion = ++dashboardLoadVersion;
+  const button = document.getElementById("refreshButton");
+  const banner = document.getElementById("statusBanner");
+  button.classList.add("loading"); button.disabled = true;
+  banner.className = "status-banner"; banner.textContent = "Loading the latest data from Google Sheets.";
+  try {
+    const isGitHubPages = location.hostname.endsWith(".github.io");
+    let payload;
+    if (isGitHubPages) {
+      payload = await fetchPublicSheets();
+    } else {
+      try {
+        const endpoint = force ? `/api/sheets?refresh=${Date.now()}` : "/api/sheets";
+        const response = await fetch(endpoint, { cache: "no-store" });
+        if (!response.ok) throw new Error((await response.json()).detail || `HTTP ${response.status}`);
+        payload = await response.json();
+      } catch (serverError) {
+        console.warn("Local sheet proxy unavailable; using the public read-only sheets endpoint.", serverError);
+        payload = await fetchPublicSheets();
+      }
+    }
+    const rolesRows = parseCsv(payload.rolesCsv);
+    if (rolesRows.length < 10) throw new Error("2026 is empty.");
+    let drafts;
+    try {
+      drafts = await fetchSharedDrafts();
+    } catch (draftError) {
+      console.warn("Shared drafts are temporarily unavailable.", draftError);
+      drafts = state.sharedDrafts;
+    }
+    if (loadVersion !== dashboardLoadVersion) return;
+    captureSheetBaseValues(rolesRows);
+    state.sheetPayload = payload;
+    state.sharedDrafts = drafts;
+    renderSheetPayload(payload);
+    banner.className = "status-banner ready";
+    const meeting = state.model.comingMeeting;
+    banner.textContent = meeting
+      ? `Updated ${formatDate(meeting.date, { year: "numeric" })} ${meeting.meetingNo || ""} from Google Sheets.`
+      : "Updated the latest data from Google Sheets.";
+    void flushLocalSaves();
+    return true;
+  } catch (error) {
+    if (loadVersion !== dashboardLoadVersion) return;
+    console.error(error);
+    banner.className = "status-banner error";
+    banner.textContent = `Unable to load data: ${error.message}`;
+    return false;
+  } finally {
+    button.classList.remove("loading"); button.disabled = false;
+  }
+}
+
+document.getElementById("memberFilter").addEventListener("change", event => { state.member = event.target.value; renderRoles(state.model); });
+document.getElementById("roleFilter").addEventListener("change", event => { state.role = event.target.value; renderRoles(state.model); });
+const memberSearchInput = document.getElementById("memberSearchInput");
+memberSearchInput.addEventListener("input", event => {
+  if (!state.model) return;
+  if (isMobileSearchViewport()) {
+    if (!clean(event.target.value) && document.getElementById("searchResultsDialog").open) document.getElementById("searchResultsDialog").close();
+    return;
+  }
+  renderMemberSearch(state.model, event.target.value);
+});
+memberSearchInput.addEventListener("keydown", event => {
+  if (event.key !== "Enter" || !state.model) return;
+  event.preventDefault();
+  renderMemberSearch(state.model, event.currentTarget.value, { openDialog: isMobileSearchViewport() });
+});
+document.getElementById("memberSearchResults").addEventListener("click", event => { const button = event.target.closest("[data-search-more]"); if (button) openSearchResultsDialog(button.dataset.searchMore); });
+document.getElementById("closeSearchResultsDialog").addEventListener("click", () => document.getElementById("searchResultsDialog").close());
+document.getElementById("searchResultsDialog").addEventListener("click", event => { if (event.target === event.currentTarget) event.currentTarget.close(); });
+document.getElementById("refreshButton").addEventListener("click", () => loadDashboard(true));
+
+const guestGuideDialog = document.getElementById("guestGuideDialog");
+const guestGuidePopup = createAnchoredDialog(guestGuideDialog, document.getElementById("guestGuideButton"));
+document.getElementById("closeGuestGuideDialog").addEventListener("click", () => { void guestGuidePopup.close(); });
+
+const roleGuidesDialog = document.getElementById("roleGuidesDialog");
+const rolePdfDialog = document.getElementById("rolePdfDialog");
+const rolePdfPages = document.getElementById("rolePdfPages");
+const rolePdfOriginalLink = document.getElementById("rolePdfOriginalLink");
+const rolePdfZoomButton = document.getElementById("rolePdfZoomButton");
+document.getElementById("roleGuidesButton").addEventListener("click", () => {
+  if (!roleGuidesDialog.open) roleGuidesDialog.showModal();
+});
+document.getElementById("closeRoleGuidesDialog").addEventListener("click", () => roleGuidesDialog.close());
+roleGuidesDialog.addEventListener("click", event => {
+  if (event.target === roleGuidesDialog) roleGuidesDialog.close();
+});
+document.querySelectorAll("[data-role-guide]").forEach(button => {
+  button.addEventListener("click", () => {
+    setText("rolePdfTitle", button.dataset.roleTitle);
+    const guide = button.dataset.roleGuide;
+    const pageCount = Number(button.dataset.rolePages || 1);
+    rolePdfPages.innerHTML = Array.from({ length: pageCount }, (_, index) => {
+      const page = index + 1;
+      const loading = page === 1 ? "eager" : "lazy";
+      return `<figure><img src="./role-guides/pages/${escapeHtml(guide)}-page-${page}.png" alt="${escapeHtml(button.dataset.roleTitle)} page ${page} of ${pageCount}" loading="${loading}"><figcaption>Page ${page} / ${pageCount}</figcaption></figure>`;
+    }).join("");
+    rolePdfOriginalLink.href = `./role-guides/${guide}.pdf`;
+    roleGuidesDialog.close();
+    rolePdfDialog.showModal();
+    rolePdfPages.scrollTop = 0;
+  });
+});
+function closeRolePdf() {
+  rolePdfDialog.close();
+  rolePdfPages.classList.remove("is-zoomed");
+  rolePdfZoomButton.textContent = "확대";
+  rolePdfZoomButton.setAttribute("aria-pressed", "false");
+  rolePdfPages.replaceChildren();
+  rolePdfOriginalLink.removeAttribute("href");
+}
+document.getElementById("closeRolePdfDialog").addEventListener("click", closeRolePdf);
+rolePdfZoomButton.addEventListener("click", () => {
+  const zoomed = rolePdfPages.classList.toggle("is-zoomed");
+  rolePdfZoomButton.textContent = zoomed ? "축소" : "확대";
+  rolePdfZoomButton.setAttribute("aria-pressed", String(zoomed));
+  if (!zoomed) rolePdfPages.scrollLeft = 0;
+});
+let rolePdfDrag = null;
+const rolePdfPointers = new Set();
+rolePdfPages.addEventListener("pointerdown", event => {
+  if (!rolePdfPages.classList.contains("is-zoomed") || (event.pointerType !== "touch" && event.pointerType !== "pen")) return;
+  rolePdfPointers.add(event.pointerId);
+  if (rolePdfPointers.size !== 1) {
+    rolePdfDrag = null;
+    return;
+  }
+  rolePdfPages.setPointerCapture?.(event.pointerId);
+  rolePdfDrag = {
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    scrollLeft: rolePdfPages.scrollLeft,
+    scrollTop: rolePdfPages.scrollTop,
+  };
+  rolePdfPages.classList.add("is-dragging");
+});
+rolePdfPages.addEventListener("pointermove", event => {
+  if (!rolePdfDrag || event.pointerId !== rolePdfDrag.pointerId || rolePdfPointers.size !== 1 || !rolePdfPages.classList.contains("is-zoomed")) return;
+  event.preventDefault();
+  rolePdfPages.scrollLeft = rolePdfDrag.scrollLeft + rolePdfDrag.x - event.clientX;
+  rolePdfPages.scrollTop = rolePdfDrag.scrollTop + rolePdfDrag.y - event.clientY;
+});
+function endRolePdfPointer(event) {
+  rolePdfPointers.delete(event.pointerId);
+  if (rolePdfDrag?.pointerId === event.pointerId) rolePdfDrag = null;
+  if (rolePdfPointers.size === 0) rolePdfPages.classList.remove("is-dragging");
+}
+rolePdfPages.addEventListener("pointerup", endRolePdfPointer);
+rolePdfPages.addEventListener("pointercancel", endRolePdfPointer);
+rolePdfPages.addEventListener("lostpointercapture", endRolePdfPointer);
+rolePdfDialog.addEventListener("click", event => {
+  if (event.target === rolePdfDialog) closeRolePdf();
+});
+rolePdfDialog.addEventListener("close", () => {
+  rolePdfPages.classList.remove("is-zoomed");
+  rolePdfZoomButton.textContent = "확대";
+  rolePdfZoomButton.setAttribute("aria-pressed", "false");
+  rolePdfPages.replaceChildren();
+  rolePdfOriginalLink.removeAttribute("href");
+});
+
+let sharedDraftPollBusy = false;
+let displayedMeetingDay = sheetDateValue(todayKst());
+async function pollSharedDrafts() {
+  const currentDay = sheetDateValue(todayKst());
+  if (currentDay !== displayedMeetingDay && state.sheetPayload) {
+    displayedMeetingDay = currentDay;
+    renderSheetPayload(state.sheetPayload);
+  }
+  if (sharedDraftPollBusy || draftSyncBusy || document.hidden || !WRITE_ENDPOINT) return;
+  sharedDraftPollBusy = true;
+  try {
+    const latest = await fetchSharedDrafts();
+    if (draftSyncBusy) return;
+    if (Number(latest.revision || 0) === Number(state.sharedDrafts.revision || 0)) return;
+    const editDialog = document.getElementById("meetingEditDialog");
+    if (editDialog.open) {
+      const status = document.getElementById("meetingEditStatus");
+      status.className = "meeting-edit-status warning";
+      status.textContent = "Another person changed the shared schedule. Save will verify this field before accepting your entry.";
+      return;
+    }
+    await loadDashboard(true);
+    const banner = document.getElementById("statusBanner");
+    banner.className = "status-banner ready";
+    banner.textContent = "Another person's shared change was loaded automatically.";
+  } catch (error) {
+    console.warn("Unable to check for shared changes.", error);
+  } finally {
+    sharedDraftPollBusy = false;
+  }
+}
+setInterval(pollSharedDrafts, 10000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) pollSharedDrafts(); });
+const adminApplyDialog = document.getElementById("adminApplyDialog");
+const changePinDialog = document.getElementById("changePinDialog");
+function openPinSettings() {
+  document.getElementById("changePinForm").reset();
+  setText("changePinStatus", "Enter the current PIN, or use the master PIN if the administrator PIN was lost. The new PIN cannot match the master PIN.");
+  changePinDialog.showModal();
+}
+document.getElementById("applySheetsButton").addEventListener("click", openAdminApplyDialog);
+document.getElementById("adminSettingsButton").addEventListener("click", openPinSettings);
+document.getElementById("closeAdminApplyDialog").addEventListener("click", () => adminApplyDialog.close());
+document.getElementById("adminApplyForm").addEventListener("submit", applySharedDrafts);
+document.getElementById("adminApplyList").addEventListener("change", event => {
+  if (event.target.matches("[data-apply-change]")) updateAdminApplySelection();
+});
+document.getElementById("openChangePinDialog").addEventListener("click", openPinSettings);
+document.getElementById("closeChangePinDialog").addEventListener("click", () => changePinDialog.close());
+document.getElementById("changePinForm").addEventListener("submit", changeAdministratorPin);
+adminApplyDialog.addEventListener("click", event => { if (event.target === adminApplyDialog) adminApplyDialog.close(); });
+changePinDialog.addEventListener("click", event => { if (event.target === changePinDialog) changePinDialog.close(); });
+const missingDialog = document.getElementById("missingDetailsDialog");
+const readinessCard = document.getElementById("meetingReadiness");
+function openMissingDialog() {
+  if (readinessCard.getAttribute("aria-disabled") !== "true") missingDialog.showModal();
+}
+readinessCard.addEventListener("click", openMissingDialog);
+readinessCard.addEventListener("keydown", event => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    openMissingDialog();
+  }
+});
+document.getElementById("closeMissingDialog").addEventListener("click", event => {
+  event.stopPropagation();
+  missingDialog.close();
+});
+missingDialog.addEventListener("click", event => {
+  if (missingDialog.open) missingDialog.close();
+});
+const speechDialog = document.getElementById("speechDetailsDialog");
+document.getElementById("closeSpeechDialog").addEventListener("click", event => {
+  event.stopPropagation();
+  speechDialog.close();
+});
+speechDialog.addEventListener("click", event => {
+  if (speechDialog.open) speechDialog.close();
+});
+speechDialog.addEventListener("close", hideTooltip);
+document.getElementById("speechDialogEditButton").addEventListener("click", event => {
+  event.stopPropagation();
+  const slot = Number(event.currentTarget.dataset.speechSlot);
+  speechDialog.close();
+  openMeetingEditor("speeches", "", slot);
+  requestAnimationFrame(() => document.querySelector("#meetingEditFields [data-edit-field]")?.focus());
+});
+const agendaDialog = document.getElementById("agendaDetailsDialog");
+document.getElementById("closeAgendaDialog").addEventListener("click", event => {
+  event.stopPropagation();
+  agendaDialog.close();
+});
+agendaDialog.addEventListener("click", event => {
+  if (event.target === agendaDialog && agendaDialog.open) agendaDialog.close();
+});
+document.getElementById("agendaDialogEditButton").addEventListener("click", event => {
+  event.stopPropagation();
+  const button = event.currentTarget;
+  const section = button.dataset.editSection;
+  const field = button.dataset.editField;
+  agendaDialog.close();
+  openMeetingEditor(section, field);
+  requestAnimationFrame(() => document.querySelector("#meetingEditFields [data-edit-field]")?.focus());
+});
+const meetingEditDialog = document.getElementById("meetingEditDialog");
+document.querySelectorAll("[data-edit-section]").forEach(button => button.addEventListener("click", () => openMeetingEditor(button.dataset.editSection)));
+document.querySelector("[data-special-event-tab]")?.addEventListener("click", () => {
+  if (canEditActiveMeeting()) openMeetingEditor("special");
+});
+function closeMeetingEditor() {
+  meetingEditDialog.close();
+  state.editOriginSpeechItem = null;
+}
+document.getElementById("closeMeetingEditDialog").addEventListener("click", closeMeetingEditor);
+document.getElementById("cancelMeetingEdit").addEventListener("click", closeMeetingEditor);
+document.getElementById("retryLocalSaves").addEventListener("click", retryLocalSaves);
+document.getElementById("discardLocalSaves").addEventListener("click", discardLocalSaves);
+document.getElementById("meetingEditForm").addEventListener("submit", saveMeetingEditor);
+document.getElementById("meetingEditFields").addEventListener("input", event => {
+  resetTentativeAssignment(event.target);
+  updateMeetingEditorState();
+});
+document.getElementById("meetingEditFields").addEventListener("click", event => {
+  const toggle = event.target.closest("[data-tentative-field]");
+  if (toggle) {
+    toggle.setAttribute("aria-pressed", toggle.getAttribute("aria-pressed") !== "true");
+    updateMeetingEditorState();
+    return;
+  }
+  const clearButton = event.target.closest("[data-clear-field]");
+  if (!clearButton) return;
+  const input = document.querySelector(`#meetingEditFields [data-edit-field="${CSS.escape(clearButton.dataset.clearField)}"]`);
+  if (input) { input.value = ""; resetTentativeAssignment(input); input.focus(); updateMeetingEditorState(); }
+});
+document.querySelectorAll("[data-dashboard-tab]").forEach(button => {
+  button.addEventListener("click", () => {
+    if (button.dataset.dashboardTab === "coming") animateReturnToComing();
+    else if (!swipeAnimating) animateHeaderMeeting(button.dataset.dashboardTab);
+  });
+});
+let swipeStart = null;
+let suppressSwipeClickUntil = 0;
+let swipeAnimating = false;
+const meetingPanel = document.getElementById("this-week");
+let suppressArrowClickUntil = 0;
+
+function updateMeetingArrowControls() {
+  if (!state.model) return;
+  const currentIndex = state.model.comingMeetingIndex + state.meetingOffset;
+  document.querySelectorAll("[data-meeting-arrow]").forEach(button => {
+    const direction = Number(button.dataset.meetingArrow);
+    button.disabled = direction < 0 ? currentIndex <= 0 : currentIndex >= state.model.regularMeetings.length - 1;
+  });
+}
+
+function moveMeetingByArrow(direction) {
+  if (swipeAnimating || !state.model) return;
+  const targetOffset = state.meetingOffset + direction;
+  const targetIndex = state.model.comingMeetingIndex + targetOffset;
+  if (targetIndex < 0 || targetIndex >= state.model.regularMeetings.length) return;
+  completeMeetingSwipe(targetOffset, direction < 0 ? 1 : -1);
+}
+
+function animateHeaderMeeting(tabName) {
+  const targetOffset = tabName === "past" ? -1 : 1;
+  if (!state.model || state.meetingOffset === targetOffset) {
+    setActiveTab(tabName);
+    return;
+  }
+  const targetIndex = state.model.comingMeetingIndex + targetOffset;
+  if (targetIndex < 0 || targetIndex >= state.model.regularMeetings.length) return;
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  completeMeetingSwipe(targetOffset, targetOffset < state.meetingOffset ? 1 : -1);
+}
+
+document.querySelectorAll("[data-meeting-arrow]").forEach(button => {
+  let holdTimer = null;
+  let held = false;
+  const direction = Number(button.dataset.meetingArrow);
+  const cancelHold = () => { clearTimeout(holdTimer); holdTimer = null; };
+  button.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || button.disabled || swipeAnimating) return;
+    held = false;
+    holdTimer = window.setTimeout(() => {
+      held = true;
+      suppressArrowClickUntil = Date.now() + 700;
+      const edgeOffset = direction < 0 ? -state.model.comingMeetingIndex : state.model.regularMeetings.length - state.model.comingMeetingIndex - 1;
+      completeMeetingSwipe(edgeOffset, direction < 0 ? 1 : -1);
+      navigator.vibrate?.(35);
+    }, 600);
+  });
+  button.addEventListener("pointerup", cancelHold);
+  button.addEventListener("pointercancel", cancelHold);
+  button.addEventListener("pointerleave", cancelHold);
+  button.addEventListener("contextmenu", event => event.preventDefault());
+  button.addEventListener("click", event => {
+    if (held || Date.now() < suppressArrowClickUntil) {
+      event.preventDefault();
+      held = false;
+      return;
+    }
+    moveMeetingByArrow(direction);
+  });
+});
+function meetingSwipeTarget(deltaX) {
+  if (!state.model) return null;
+  const targetOffset = state.meetingOffset + (deltaX < 0 ? 1 : -1);
+  const targetIndex = state.model.comingMeetingIndex + targetOffset;
+  return targetIndex >= 0 && targetIndex < state.model.regularMeetings.length ? targetOffset : null;
+}
+
+function resetMeetingSwipe(animated = true) {
+  meetingPanel.style.transition = animated ? "transform 180ms ease-out, opacity 180ms ease-out" : "none";
+  meetingPanel.style.transform = "translate3d(0, 0, 0)";
+  meetingPanel.style.opacity = "1";
+}
+
+function completeMeetingSwipe(targetOffset, deltaX) {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    setMeetingOffset(targetOffset, true, false);
+    resetMeetingSwipe(false);
+    return;
+  }
+  swipeAnimating = true;
+  const direction = Math.sign(deltaX);
+  meetingPanel.style.transition = "transform 190ms ease-in, opacity 190ms ease-in";
+  meetingPanel.style.transform = `translate3d(${direction * window.innerWidth}px, 0, 0)`;
+  meetingPanel.style.opacity = "0.35";
+  window.setTimeout(() => {
+    setMeetingOffset(targetOffset, true, false);
+    meetingPanel.style.transition = "none";
+    meetingPanel.style.transform = `translate3d(${-direction * window.innerWidth}px, 0, 0)`;
+    meetingPanel.style.opacity = "0.35";
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      meetingPanel.style.transition = "transform 230ms cubic-bezier(.22,.72,.25,1), opacity 230ms ease-out";
+      meetingPanel.style.transform = "translate3d(0, 0, 0)";
+      meetingPanel.style.opacity = "1";
+      window.setTimeout(() => {
+        meetingPanel.style.transition = "";
+        meetingPanel.style.transform = "";
+        meetingPanel.style.opacity = "";
+        swipeAnimating = false;
+      }, 240);
+    }));
+  }, 195);
+}
+
+function animateReturnToComing() {
+  if (!state.model || state.meetingOffset === 0 || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    setActiveTab("coming");
+    return;
+  }
+  if (swipeAnimating) return;
+  swipeAnimating = true;
+  swipeStart = null;
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  const pageCount = Math.abs(state.meetingOffset);
+  const stepDuration = Math.max(18, Math.min(85, 650 / pageCount));
+  const halfStep = Math.max(13, Math.floor(stepDuration / 2));
+  const direction = Math.sign(state.meetingOffset);
+  const advance = () => {
+    const nextOffset = state.meetingOffset + (state.meetingOffset > 0 ? -1 : 1);
+    meetingPanel.style.transition = `transform ${halfStep}ms ease-in, opacity ${halfStep}ms linear`;
+    meetingPanel.style.transform = `translate3d(${direction * window.innerWidth}px, 0, 0)`;
+    meetingPanel.style.opacity = "0.42";
+    window.setTimeout(() => {
+      setMeetingOffset(nextOffset, true, false);
+      meetingPanel.style.transition = "none";
+      meetingPanel.style.transform = `translate3d(${-direction * window.innerWidth}px, 0, 0)`;
+      meetingPanel.style.opacity = "0.42";
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        meetingPanel.style.transition = `transform ${halfStep}ms ease-out, opacity ${halfStep}ms linear`;
+        meetingPanel.style.transform = "translate3d(0, 0, 0)";
+        meetingPanel.style.opacity = "1";
+        window.setTimeout(() => {
+          if (nextOffset !== 0) {
+            advance();
+            return;
+          }
+          meetingPanel.style.transition = "";
+          meetingPanel.style.transform = "";
+          meetingPanel.style.opacity = "";
+          swipeAnimating = false;
+        }, halfStep);
+      }));
+    }, halfStep);
+  };
+  advance();
+}
+
+document.addEventListener("touchstart", event => {
+  if (swipeAnimating || event.touches.length !== 1) return;
+  if (document.querySelector("dialog[open]") || event.target.closest(".topbar, .dashboard-tabs, dialog")) return;
+  const touch = event.touches[0];
+  swipeStart = { x: touch.clientX, y: touch.clientY };
+  resetMeetingSwipe(false);
+}, { passive: true });
+document.addEventListener("touchmove", event => {
+  if (!swipeStart || event.touches.length !== 1) return;
+  const touch = event.touches[0];
+  const deltaX = touch.clientX - swipeStart.x;
+  const deltaY = touch.clientY - swipeStart.y;
+  if (Math.abs(deltaX) <= 8 || Math.abs(deltaX) <= Math.abs(deltaY)) return;
+  event.preventDefault();
+  const atBoundary = meetingSwipeTarget(deltaX) === null;
+  const visualX = atBoundary ? deltaX * 0.18 : deltaX;
+  meetingPanel.style.transition = "none";
+  meetingPanel.style.transform = `translate3d(${visualX}px, 0, 0)`;
+  meetingPanel.style.opacity = String(Math.max(0.72, 1 - Math.abs(visualX) / window.innerWidth * 0.28));
+}, { passive: false });
+document.addEventListener("touchend", event => {
+  if (!swipeStart || event.changedTouches.length !== 1) return;
+  const touch = event.changedTouches[0];
+  const deltaX = touch.clientX - swipeStart.x;
+  const deltaY = touch.clientY - swipeStart.y;
+  swipeStart = null;
+  const threshold = Math.min(56, window.innerWidth * 0.14);
+  if (Math.abs(deltaX) < threshold || Math.abs(deltaX) <= Math.abs(deltaY) * 1.15) {
+    resetMeetingSwipe(true);
+    return;
+  }
+  suppressSwipeClickUntil = Date.now() + 450;
+  const target = meetingSwipeTarget(deltaX);
+  if (target !== null) completeMeetingSwipe(target, deltaX);
+  else resetMeetingSwipe(true);
+}, { passive: true });
+document.addEventListener("touchcancel", () => { swipeStart = null; resetMeetingSwipe(true); }, { passive: true });
+document.addEventListener("click", event => {
+  if (Date.now() < suppressSwipeClickUntil || Date.now() < suppressLongPressClickUntil) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}, true);
+const initialTab = ({ "#past-meeting": "past", "#coming-up": "coming", "#next-meeting": "next" })[location.hash] || "coming";
+initializeMeetingPeople();
+initializeRoleSuggestions();
+initializeLibrarySettings();
+setActiveTab(initialTab, false);
+loadDashboard(false);
