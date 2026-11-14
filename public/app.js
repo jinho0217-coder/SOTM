@@ -256,7 +256,7 @@ function meetingReferenceDateKst(now = new Date()) {
     hourCycle: "h23",
   }).formatToParts(now);
   const map = Object.fromEntries(parts.map(p => [p.type, p.value]));
-  if (map.weekday === "Sun" && Number(map.hour) >= 13) {
+  if (map.weekday === "Wed" && Number(map.hour) >= 14) {
     return new Date(today.getTime() + 24 * 60 * 60 * 1000);
   }
   return today;
@@ -1629,9 +1629,13 @@ rolePdfDialog.addEventListener("close", () => {
 });
 
 let sharedDraftPollBusy = false;
-let displayedMeetingDay = sheetDateValue(todayKst());
+function meetingDisplayDates(now = new Date()) {
+  return [todayKst(now), assignmentConfirmationDateKst(now), meetingReferenceDateKst(now)].map(date => date.getTime()).join("/");
+}
+
+let displayedMeetingDay = meetingDisplayDates();
 async function pollSharedDrafts() {
-  const currentDay = sheetDateValue(todayKst());
+  const currentDay = meetingDisplayDates();
   if (currentDay !== displayedMeetingDay && state.sheetPayload) {
     displayedMeetingDay = currentDay;
     renderSheetPayload(state.sheetPayload);

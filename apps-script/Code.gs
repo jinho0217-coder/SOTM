@@ -80,8 +80,8 @@ function normalizedDate(value) {
 
 function meetingReferenceDate() {
   const now = new Date();
-  const sundayAfterOne = Utilities.formatDate(now, TIME_ZONE, "EEE") === "Sun" && Number(Utilities.formatDate(now, TIME_ZONE, "H")) >= 13;
-  const reference = sundayAfterOne ? new Date(now.getTime() + 24 * 60 * 60 * 1000) : now;
+  const wednesdayAfterTwo = Utilities.formatDate(now, TIME_ZONE, "EEE") === "Wed" && Number(Utilities.formatDate(now, TIME_ZONE, "H")) >= 14;
+  const reference = wednesdayAfterTwo ? new Date(now.getTime() + 24 * 60 * 60 * 1000) : now;
   return Utilities.formatDate(reference, TIME_ZONE, "yyyy-MM-dd");
 }
 
@@ -169,8 +169,21 @@ function confirmDueAssignments(context, drafts, today) {
   return drafts;
 }
 
+function assignmentConfirmationDate(now = new Date()) {
+  const tuesdayAfterFour = Utilities.formatDate(now, TIME_ZONE, "EEE") === "Tue"
+    && Number(Utilities.formatDate(now, TIME_ZONE, "H")) >= 4;
+  const cutoff = tuesdayAfterFour ? new Date(now.getTime() + 86400000) : now;
+  return Utilities.formatDate(cutoff, TIME_ZONE, "yyyy-MM-dd");
+}
+
+function installAssignmentConfirmationTrigger() {
+  const handler = "refreshAutomaticConfirmations";
+  if (ScriptApp.getProjectTriggers().some(trigger => trigger.getHandlerFunction() === handler)) return;
+  ScriptApp.newTrigger(handler).timeBased().everyMinutes(1).create();
+}
+
 function refreshAutomaticConfirmations() {
-  const today = Utilities.formatDate(new Date(), TIME_ZONE, "yyyy-MM-dd");
+  const today = assignmentConfirmationDate();
   const cache = CacheService.getScriptCache();
   if (cache.get("YTTM_AUTO_CONFIRM_DAY") === today) return;
   const lock = LockService.getScriptLock();
@@ -324,7 +337,7 @@ function doPost(event) {
       if (previous && JSON.parse(previous).ok) return jsonResponse(JSON.parse(previous));
     }
     const context = sheetContext();
-    const today = Utilities.formatDate(new Date(), TIME_ZONE, "yyyy-MM-dd");
+    const today = assignmentConfirmationDate();
     confirmDueAssignments(context, readDrafts(), today);
 
     if (request.action === "saveDraft") {

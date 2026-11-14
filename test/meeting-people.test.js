@@ -122,12 +122,12 @@ function service() {
   return { context, values, properties, post: body => context.doPost({ postData: { contents: JSON.stringify(body) } }) };
 }
 
-test("automatic confirmation starts exactly at midnight in Korea, preserving future dates and no-meeting dates", () => {
+test("automatic confirmation starts Tuesday at 04:00 in Korea, preserving future dates and no-meeting dates", () => {
   const c = client();
-  const rows = [["Date", "2026-11-01", "2026-11-08", "2026-10-25"], ['Chairperson', '◷ Jin', '◷ Next', '◷ Absent'], ['Speaker 1', '◷ Anne', '', ''], ['Special Event', '', '', 'No Meeting'], ['Theme', '◷ Theme', '', '']];
-  c.confirmDueAssignmentRows(rows, new Date('2026-10-31T14:59:59Z'));
+  const rows = [["Date", "2026-11-04", "2026-11-11", "2026-10-28"], ['Chairperson', '◷ Jin', '◷ Next', '◷ Absent'], ['Speaker 1', '◷ Anne', '', ''], ['Special Event', '', '', 'No Meeting'], ['Theme', '◷ Theme', '', '']];
+  c.confirmDueAssignmentRows(rows, new Date('2026-11-02T18:59:59Z'));
   assert.equal(rows[1][1], '◷ Jin');
-  c.confirmDueAssignmentRows(rows, new Date('2026-10-31T15:00:00Z'));
+  c.confirmDueAssignmentRows(rows, new Date('2026-11-02T19:00:00Z'));
   assert.equal(rows[1][1], 'Jin');
   assert.equal(rows[2][1], 'Anne');
   assert.equal(rows[1][2], '◷ Next');

@@ -22,8 +22,17 @@ function guestRoleIcon(value) {
 }
 function isAssignmentField(label) { return ROLE_EDIT_FIELDS.includes(label) || /^(Speaker|Evaluator) [1-2]$/.test(label); }
 function confirmedAssignment(value) { return Boolean(normalizeName(value)) && !isTentative(value); }
-function confirmDueAssignmentRows(rows, now = new Date()) {
+function assignmentConfirmationDateKst(now = new Date()) {
   const today = todayKst(now);
+  // Tuesday midnight in Seoul falls on Monday UTC.
+  if (today.getUTCDay() === 1 && now.getTime() - today.getTime() >= 4 * 60 * 60 * 1000) {
+    return new Date(today.getTime() + 86400000);
+  }
+  return today;
+}
+
+function confirmDueAssignmentRows(rows, now = new Date()) {
+  const today = assignmentConfirmationDateKst(now);
   const mapped = rowMap(rows);
   (rows[0] || []).forEach((value, col) => {
     const date = parseDate(value);
