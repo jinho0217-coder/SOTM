@@ -13,7 +13,7 @@ const AWARD_DISPLAY_LABELS = {
 };
 const ROLE_EDIT_FIELDS = [
   "Chairperson", "Toastmaster", "General Evaluator", "Table Topic Master", "Timer",
-  "Ah Counter", "Grammarian", "Word & Quote Master", "Quiz Master", "Table Topic Evaluator",
+  "Ah Counter", "Grammarian", "Word & Quote Master",
 ];
 
 async function libraryRequest(payload) {
@@ -195,8 +195,8 @@ function setMeetingOffset(offset, updateHash = true, scrollToTop = false) {
 
 const ROLE_LABELS = [
   "Chairperson", "Toastmaster", "General Evaluator", "Table Topic Master",
-  "Timer", "Ah Counter", "Grammarian", "Word & Quote Master", "Quiz Master",
-  "Table Topic Evaluator", "Speaker", "Evaluator",
+  "Timer", "Ah Counter", "Grammarian", "Word & Quote Master",
+  "Speaker", "Evaluator",
 ];
 
 const AGENDA_FALLBACK = [
@@ -280,7 +280,6 @@ function canonicalRole(label) {
     "Table Topic Master": "Table Topic Master",
     "Table Topics Master": "Table Topic Master",
     "Ah counter": "Ah Counter",
-    "Table Topic evaluator": "Table Topic Evaluator",
   };
   return map[value] || value;
 }
@@ -436,11 +435,9 @@ function detailedAgenda(model, meeting) {
         headers: ["Role", "Person"],
         rows: [
           ["General Evaluator", memberFor("General Evaluator")],
-          ["Table Topic Evaluator", memberFor("Table Topic Evaluator")],
           ["Grammarian + The Word and Quote Master", combinedMembers(["Grammarian", "Word & Quote Master"])],
           ["Ah-Counter", memberFor("Ah Counter")],
           ["Timer", memberFor("Timer")],
-          ["Quiz Master", memberFor("Quiz Master")],
         ],
       },
     },
@@ -465,8 +462,6 @@ function detailedAgenda(model, meeting) {
         rows: [
           ["Ah-Counter's report", memberFor("Ah Counter")],
           ["Grammarian's report", memberFor("Grammarian")],
-          ["Table Topic Evaluator", memberFor("Table Topic Evaluator")],
-          ["Quiz Master", memberFor("Quiz Master")],
           ["General Evaluator's report", memberFor("General Evaluator")],
         ],
       },
@@ -570,14 +565,6 @@ const ROLE_AGENDA_DUTIES = {
   "Word & Quote Master": [
     ["10:05", "Introduce the Word of the Day and Quote of the Day, including meaning and usage."],
     ["11:30", "Report how the Word of the Day was used during the meeting."],
-  ],
-  "Quiz Master": [
-    ["10:05", "Explain the listening quiz and note important details throughout the meeting."],
-    ["11:30", "Conduct the quiz and deliver the Quiz Master's report."],
-  ],
-  "Table Topic Evaluator": [
-    ["11:00", "Observe Table Topic speakers and prepare concise feedback."],
-    ["11:30", "Deliver the Table Topic evaluation during the Evaluation Session."],
   ],
 };
 

@@ -15,7 +15,7 @@ const EDITABLE_FIELDS = {
   special: ["Special Event"],
   roles: [
     "Chairperson", "Toastmaster", "General Evaluator", "Table Topic Master", "Timer",
-    "Ah Counter", "Grammarian", "Word & Quote Master", "Quiz Master", "Table Topic Evaluator",
+    "Ah Counter", "Grammarian", "Word & Quote Master",
     "Best Speaker", "Best evaluator", "Best table topic speaker",
   ],
   speeches: [
